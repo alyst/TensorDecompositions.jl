@@ -48,10 +48,10 @@ release!(helper::SPNNTuckerHelper, size) = release!(helper.arr_pool, size)
 
 function _spnntucker_update_tensorXfactors_low!(helper::SPNNTuckerHelper{T,N}, decomp::Tucker{T,N}) where {T,N}
     tensorcontractmatrix!(helper.tnsrXfactors_low[1], helper.tnsr,
-                          decomp.factors[1], 1)
+                          factor(decomp, 1), 1)
     for n in 2:N
         tensorcontractmatrix!(helper.tnsrXfactors_low[n],
-                              helper.tnsrXfactors_low[n-1], decomp.factors[n], n)
+                              helper.tnsrXfactors_low[n-1], factor(decomp, n), n)
     end
     return helper
 end
@@ -60,14 +60,14 @@ function _spnntucker_factor_grad_components!(helper::SPNNTuckerHelper{T,N}, deco
     all_but_n = [1:(n-1); (n+1):N]
     cXa_size = (size(helper.tnsr)[1:n-1]..., helper.core_dims[n], size(helper.tnsr)[(n+1):N]...)
     coreXantifactor = tensorcontractmatrices!(acquire!(helper, cXa_size),
-                                              decomp.core,
-                                              decomp.factors[all_but_n], all_but_n, transpose=true)
+                                              core(decomp),
+                                              factors(decomp, all_but_n), all_but_n, pool=helper.arr_pool, transpose=true)
     cXa2 = tensorcontract!(1, coreXantifactor, 1:N, 'N',
                     coreXantifactor, [1:(n-1); N+1; (n+1):N], 'N',
                     0, acquire!(helper, (helper.core_dims[n], helper.core_dims[n])), [n, N+1], method=:BLAS)
     tXcXa = tensorcontract!(1, helper.tnsr, 1:N, 'N',
                     coreXantifactor, [1:(n-1); N+1; (n+1):N], 'N',
-                    0, acquire!(helper, size(decomp.factors[n])), [n, N+1], method=:BLAS)
+                    0, acquire!(helper, size(factor(decomp, n))), [n, N+1], method=:BLAS)
     release!(helper, coreXantifactor)
     return cXa2, tXcXa
 end
@@ -75,9 +75,9 @@ end
 function _spnntucker_reg_penalty(decomp::Tucker{T,N}, lambdas::Vector{T}) where {T,N}
     res = 0.0
     for i in 1:N
-        res += lambdas[i] > 0.0 ? (lambdas[i] * sum(decomp.factors[i])) : 0.0
+        res += lambdas[i] > 0.0 ? (lambdas[i] * sum(abs, factor(decomp, i))) : 0.0
     end
-    return res + (lambdas[N+1] > 0.0 ? (lambdas[N+1] * sum(abs, decomp.core)) : 0.0)
+    return res + (lambdas[N+1] > 0.0 ? (lambdas[N+1] * sum(abs, core(decomp))) : 0.0)
 end
 
 _spnntucker_project(::Type{Val{PRJ}}, x, lambda, bound) where {PRJ} = throw(ArgumentError("Unknown project type: $PRJ"))
@@ -100,7 +100,7 @@ function _spnntucker_update_core!(prj::Type{Val{PRJ}},
                                 helper.tnsrXfactors_low[n], dest.factors[(n+1):N], (n+1):N) :
         helper.tnsrXfactors_low[N]
     s = (1.0/helper.L[N+1])
-    core_grad = tensorcontractmatrices!(acquire!(helper, helper.core_dims), src.core, src_factor2s)
+    core_grad = tensorcontractmatrices!(acquire!(helper, helper.core_dims), core(src), src_factor2s)
     s_lambda = (helper.lambdas[N+1]/helper.L[N+1])::Float64
     bound = helper.bounds[N+1]
     dest.core .= _spnntucker_project.(prj, src.core .- s .* (core_grad .- tensorXfactors_all),
@@ -116,16 +116,17 @@ function _spnntucker_update_factor!(
     helper::SPNNTuckerHelper{T,N}, dest::Tucker{T,N}, src::Tucker{T,N},
     dest_factor2s::Vector{Matrix{T}}, n::Int
 ) where {T,N}
+    src_factor = factor(src, n)
+    dest_factor = factor(dest, n)
     coreXantifactor2, tnsrXcoreXantifactor = _spnntucker_factor_grad_components!(helper, dest, n)::Tuple{Matrix{T}, Matrix{T}}
-    factorXcoreXantifactor2 = mul!(acquire!(helper, size(src.factors[n])), src.factors[n], coreXantifactor2)
+    factorXcoreXantifactor2 = mul!(acquire!(helper, size(src_factor)), src_factor, coreXantifactor2)
 
     # update Lipschitz constant
     helper.L0[n] = helper.L[n]
     helper.L[n] = max(helper.Lmin, norm(coreXantifactor2))
     s = (1.0/helper.L[n])
     # update n-th factor matrix
-    src_factor = src.factors[n]
-    dest_factor = dest.factors[n]
+
     lambda = helper.lambdas[n]
     bound = helper.bounds[n]
     @assert size(dest_factor) == size(src_factor) == size(factorXcoreXantifactor2) == size(tnsrXcoreXantifactor)
@@ -263,12 +264,12 @@ function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
     decomp_p = deepcopy(decomp0)   # proxy decomposition
 
     #verbose && @info("Calculating factors squares...")
-    factor2s0 = Matrix{T}[f'f for f in decomp0.factors]
+    factor2s0 = Matrix{T}[f'f for f in factors(decomp0)]
     factor2s = deepcopy(factor2s0)
     factor2_nrms = norm.(factor2s)
 
     #verbose && @info("Calculating initial residue...")
-    resid = resid0 = 0.5*norm(tnsr - compose(decomp0))^2 + _spnntucker_reg_penalty(decomp0, lambdas)
+    resid = resid0 = 0.5*sum(abs2, tnsr .- compose(decomp0)) + _spnntucker_reg_penalty(decomp0, lambdas)
     resid = resid0 # current residual error
     verbose && @info("Initial residue=$resid0")
 
