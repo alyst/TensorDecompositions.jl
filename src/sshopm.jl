@@ -49,7 +49,7 @@ function sshopm(tnsr::AbstractArray{T,N},
     r = size(tnsr, 1)
     all(isequal(r), size(tnsr)) || throw(DimensionMismatch("Input tensor should have the same dimension in all modes, got $(size(tnsr))."))
     x = randn(r)
-    x .*= 1/norm(x)
+    x .*= one(T)/norm(x)
     x_old = similar(x)
     converged = false
     niters = 0
@@ -59,7 +59,7 @@ function sshopm(tnsr::AbstractArray{T,N},
     
         copyto!(x_old, x)
         x .= flipsign.(nmul(tnsr, x) .+ alpha .* x, alpha)
-        x .*= 1/norm(x)
+        x .*= one(T)/norm(x)
         converged = norm(x .- x_old) < tol
         niters += 1
     end
