@@ -63,22 +63,36 @@ end
 """
 Contract N-mode tensor and M matrices.
 
+If `pool` is provided, the resulting tensor is acquired from the pool.
+
   * `tensor` tensor to contract
   * `matrices` matrices to contract
   * `modes` corresponding modes of matrices to contract
+  * `pool` `ArrayPool` to use for getting intermediate and resulting tensors
   * `transpose` if true, matrices are contracted along their columns
 """
-function tensorcontractmatrices(tensor::StridedArray, matrices::Any,
+function tensorcontractmatrices(tensor::StridedArray{T,N}, matrices::Any,
                                 modes::Any = 1:length(matrices);
-                                transpose::Bool=false, method::Symbol=:BLAS)
+                                pool::Union{ArrayPool{T}, Nothing} = nothing,
+                                transpose::Bool=false, method::Symbol=:BLAS) where {T, N}
     length(matrices) == length(modes) ||
         throw(ArgumentError("The number of matrices doesn't match the length of mode sequence"))
-    res = tensor
-    for i in eachindex(matrices)
-        res = tensorcontractmatrix(res, matrices[i], modes[i],
-                                   transpose=transpose, method=method)
+    if pool === nothing
+        res = tensor
+        for i in eachindex(matrices)
+            res = tensorcontractmatrix(res, matrices[i], modes[i],
+                                       transpose=transpose, method=method)
+        end
+        return res
+    else
+        new_size = collect(size(tensor))
+        for (mtx, mode) in zip(matrices, modes)
+            new_size[mode] = size(mtx, transpose ? 1 : 2)
+        end
+        return tensorcontractmatrices!(acquire!(pool, ntuple(i -> new_size[i], N)),
+                                tensor, matrices, modes,
+                                pool=pool, transpose=transpose, method=method)
     end
-    return res
 end
 
 """
