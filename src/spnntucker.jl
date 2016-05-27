@@ -55,18 +55,18 @@ end
 
 function _spnntucker_factor_grad_components!(helper::SPNNTuckerHelper{T,N}, decomp::Tucker{T,N}, n::Int) where {T,N}
     all_but_n = [1:(n-1); (n+1):N]
-    cXa_size = (size(helper.tnsr)[1:n-1]..., helper.core_dims[n], size(helper.tnsr)[(n+1):N]...)
-    coreXantifactor = tensorcontractmatrices!(acquire!(helper, cXa_size),
-                                              core(decomp),
-                                              factors(decomp, all_but_n), all_but_n, transpose=true, helper=helper)
-    cXa2 = tensorcontract!(1, coreXantifactor, 1:N, 'N',
-                    coreXantifactor, [1:(n-1); N+1; (n+1):N], 'N',
-                    0, acquire!(helper, (helper.core_dims[n], helper.core_dims[n])), [n, N+1], method=:BLAS)
-    tXcXa = tensorcontract!(1, helper.tnsr, 1:N, 'N',
-                    coreXantifactor, [1:(n-1); N+1; (n+1):N], 'N',
-                    0, acquire!(helper, size(factor(decomp, n))), [n, N+1], method=:BLAS)
-    release!(helper, coreXantifactor)
-    return cXa2, tXcXa
+    cXtf_size = (size(helper.tnsr)[1:n-1]..., helper.core_dims[n], size(helper.tnsr)[(n+1):N]...)
+    coreXtfactor = tensorcontractmatrices!(acquire!(helper, cXtf_size),
+                                           core(decomp),
+                                           factors(decomp, all_but_n), all_but_n, transpose=true, helper=helper)
+    cXtf2 = tensorcontract!(1, coreXtfactor, 1:N, 'N',
+                            coreXtfactor, [1:(n-1); N+1; (n+1):N], 'N',
+                            0, acquire!(helper, (helper.core_dims[n], helper.core_dims[n])), [n, N+1], method=:BLAS)
+    tXcXtf = tensorcontract!(1, helper.tnsr, 1:N, 'N',
+                             coreXtfactor, [1:(n-1); N+1; (n+1):N], 'N',
+                             0, acquire!(helper, size(factor(decomp, n))), [n, N+1], method=:BLAS)
+    release!(helper, coreXtfactor)
+    return cXtf2, tXcXtf
 end
 
 function _spnntucker_reg_penalty(decomp::Tucker{T,N}, lambdas::Vector{T}) where {T,N}
@@ -115,31 +115,31 @@ function _spnntucker_update_factor!(
 ) where {T,N}
     src_factor = factor(src, n)
     dest_factor = factor(dest, n)
-    coreXantifactor2, tnsrXcoreXantifactor = _spnntucker_factor_grad_components!(helper, dest, n)::Tuple{Matrix{T}, Matrix{T}}
-    factorXcoreXantifactor2 = mul!(acquire!(helper, size(src_factor)), src_factor, coreXantifactor2)
+    coreXtfactor2, tnsrXcoreXtfactor = _spnntucker_factor_grad_components!(helper, dest, n)
+    factorXcoreXtfactor2 = mul!(acquire!(helper, size(src_factor)), src_factor, coreXtfactor2)
 
     # update Lipschitz constant
     helper.L0[n] = helper.L[n]
-    helper.L[n] = max(helper.Lmin, norm(coreXantifactor2))
+    helper.L[n] = max(helper.Lmin, norm(coreXtfactor2))
     s = (1.0/helper.L[n])
     # update n-th factor matrix
 
     lambda = helper.lambdas[n]
     bound = helper.bounds[n]
-    @assert size(dest_factor) == size(src_factor) == size(factorXcoreXantifactor2) == size(tnsrXcoreXantifactor)
+    @assert size(dest_factor) == size(src_factor) == size(factorXcoreXtfactor2) == size(tnsrXcoreXtfactor)
     @inbounds if lambda == 0.0 && isfinite(bound)
-        dest_factor .= clamp.(src_factor .- s .* (factorXcoreXantifactor2 .- tnsrXcoreXantifactor), 0.0, bound)
+        dest_factor .= clamp.(src_factor .- s .* (factorXcoreXtfactor2 .- tnsrXcoreXtfactor), 0.0, bound)
     else
-        dest_factor .= max.(src_factor .- s .* (factorXcoreXantifactor2 .- tnsrXcoreXantifactor .+ lambda), 0.0)
+        dest_factor .= max.(src_factor .- s .* (factorXcoreXtfactor2 .- tnsrXcoreXtfactor .+ lambda), 0.0)
     end
     dest_factor2 = mul!(dest_factor2s[n], dest_factor', dest_factor)
-    factor2XcoreXantifactor2 = dot(dest_factor2, coreXantifactor2)
-    factorXtnsrXcoreXantifactor = dot(dest_factor, tnsrXcoreXantifactor)
-    release!(helper, coreXantifactor2)
-    release!(helper, tnsrXcoreXantifactor)
-    release!(helper, factorXcoreXantifactor2)
+    factor2XcoreXtfactor2 = dot(dest_factor2, coreXtfactor2)
+    factorXtnsrXcoreXtfactor = dot(dest_factor, tnsrXcoreXtfactor)
+    release!(helper, coreXtfactor2)
+    release!(helper, tnsrXcoreXtfactor)
+    release!(helper, factorXcoreXtfactor2)
 
-    return 0.5*(factor2XcoreXantifactor2-2*factorXtnsrXcoreXantifactor+helper.tnsr_nrm^2) +
+    return 0.5*(factor2XcoreXtfactor2-2*factorXtnsrXcoreXtfactor+helper.tnsr_nrm^2) +
             _spnntucker_reg_penalty(dest, helper.lambdas)
 end
 
