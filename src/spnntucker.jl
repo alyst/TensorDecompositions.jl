@@ -96,7 +96,7 @@ function _spnntucker_update_core!(prj::Type{Val{PRJ}},
         tensorcontractmatrices!(acquire!(helper, helper.core_dims),
                                 helper.tnsrXfactors_low[n], dest.factors[(n+1):N], (n+1):N, helper=helper) :
         helper.tnsrXfactors_low[N]
-    s = (1.0/helper.L[N+1])
+    s = (one(T)/helper.L[N+1])
     core_grad = tensorcontractmatrices!(acquire!(helper, helper.core_dims), core(src), src_factor2s, helper=helper)
     s_lambda = (helper.lambdas[N+1]/helper.L[N+1])::Float64
     bound = helper.bounds[N+1]
@@ -127,10 +127,10 @@ function _spnntucker_update_factor!(
     lambda = helper.lambdas[n]
     bound = helper.bounds[n]
     @assert size(dest_factor) == size(src_factor) == size(factorXcoreXtfactor2) == size(tnsrXcoreXtfactor)
-    @inbounds if lambda == 0.0 && isfinite(bound)
-        dest_factor .= clamp.(src_factor .- s .* (factorXcoreXtfactor2 .- tnsrXcoreXtfactor), 0.0, bound)
+    @inbounds if lambda == 0 && isfinite(bound)
+        dest_factor .= clamp.(src_factor .- s .* (factorXcoreXtfactor2 .- tnsrXcoreXtfactor), zero(T), bound)
     else
-        dest_factor .= max.(src_factor .- s .* (factorXcoreXtfactor2 .- tnsrXcoreXtfactor .+ lambda), 0.0)
+        dest_factor .= max.(src_factor .- s .* (factorXcoreXtfactor2 .- tnsrXcoreXtfactor .+ lambda), zero(T))
     end
     dest_factor2 = mul!(dest_factor2s[n], dest_factor', dest_factor)
     factor2XcoreXtfactor2 = dot(dest_factor2, coreXtfactor2)
