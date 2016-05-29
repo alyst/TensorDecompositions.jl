@@ -24,9 +24,15 @@ Returns the core tensor of Tucker decomposition.
 core(decomp::Tucker) = decomp.core
 
 """
+Returns the specified factor matrix of Tucker decomposition.
+"""
+factor(decomp::Tucker, i::Int) = decomp.factors[i]
+
+"""`factors(decomp::Tucker, [ixs])`
 Returns the factor matrices of Tucker decomposition.
 """
 factors(decomp::Tucker) = decomp.factors
+factors(decomp::Tucker, ixs) = decomp.factors[ixs]
 
 """
 Composes a full tensor from Tucker decomposition.
