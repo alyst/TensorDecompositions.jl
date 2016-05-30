@@ -14,8 +14,8 @@ Random.seed!(12345)
 
     # Solve the problem
     @time tucker_spnn = spnntucker(tnsr, size(tucker_orig.core), tol=1E-5, ini_decomp=:hosvd,
-                            core_nonneg=true,
-                            max_iter=1000, verbose=true, lambdas=fill(0.1, 4))
+                             core_nonneg=true,
+                             max_iter=1000, verbose=true, lambdas=fill(0.01, 4))
 
     # Reporting
     @test rel_residue(tucker_spnn) < 0.05
@@ -56,7 +56,7 @@ end
     # Solve the problem
     @time tucker_spnn = spnntucker(tnsr, size(tucker_orig.core), tol=1E-4, ini_decomp=:hosvd,
                                    core_nonneg=true, tensor_weights=rand(size(tnsr)...), #fill(1.0, size(tnsr)...),
-                                   max_iter=1000, verbose=true, lambdas=fill(0.1, 4))
+                                   max_iter=1000, verbose=true, lambdas=fill(0.01, 4))
 
     # Reporting
     @test rel_residue(tucker_spnn) < 0.05
