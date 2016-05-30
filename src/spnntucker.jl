@@ -341,7 +341,7 @@ function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
         nstall = cur_state.rel_residue_delta < tol ? nstall + 1 : 0
         if nstall >= 3 || cur_state.rel_residue < tol
             verbose && (cur_state.rel_residue == 0.0) && @info("Residue is zero. Exact decomposition was found")
-            verbose && (nstall >= 3) && @info("Relative error below $tol $nstall times in a row")
+            verbose && (nstall >= 3) && @info("Decrease of the relative error is below $tol $nstall times in a row")
             verbose && (cur_state.rel_residue < tol) && @info("Relative error is $(cur_state.rel_residue) times below input tensor norm")
             verbose && @info("spnntucker() converged in $niter iteration(s), $nredo redo steps")
             converged = true
