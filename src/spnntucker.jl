@@ -323,9 +323,9 @@ function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
                               tensor_weights=tensor_weights, verbose = verbose)
     verbose && @info("|tensor|=$(helper.wtnsr_nrm)")
 
-    verbose && @info("Rescaling initial decomposition...")
     decomp0 = deepcopy(ini_decomp)
     if rescale_ini
+        verbose && @info("Rescaling initial decomposition...")
         rescale!(decomp0, helper.wtnsr_nrm)
     end
     decomp = deepcopy(decomp0)     # current decomposition
