@@ -90,10 +90,11 @@ _spnntucker_project(::Type{Val{:Unbounded}}, x, lambda, bound) = x
 _spnntucker_project(::Type{Val{:SignedReg}}, x, lambda, bound) = x > lambda ? x - lambda : (x < -lambda ? x + lambda : 0.0)
 _spnntucker_project(::Type{Val{:SignedBounded}}, x, lambda, bound) = x > bound ? bound : (x < -bound ? -bound : x)
 
-# update core tensor of dest
+# update core tensor of `decomp`
 function _spnntucker_update_core!(prj::Type{Val{PRJ}},
-    helper::SPNNTuckerHelper{T,N}, dest::Tucker{T,N}, src::Tucker{T,N},
-    src_factor2s::Vector{Matrix{T}}, n::Integer
+    decomp::Tucker{T,N}, src_core::StridedArray{T,N},
+    factor2s::Vector{Matrix{T}}, n::Integer,
+    helper::SPNNTuckerHelper{T,N}
 ) where {T,N,PRJ}
     s = (helper.StepMult[N+1]/helper.L[N+1])
     s_lambda = (helper.lambdas[N+1]/helper.L[N+1])
@@ -102,38 +103,38 @@ function _spnntucker_update_core!(prj::Type{Val{PRJ}},
     if helper.tnsr_weights === nothing
         tensorXfactors_all = n < N ?
             tensorcontractmatrices!(acquire!(helper, helper.core_dims),
-                                    helper.wtnsrXfactors_low[n], dest.factors[(n+1):N], (n+1):N, helper=helper) :
+                                    helper.wtnsrXfactors_low[n], decomp.factors[(n+1):N], (n+1):N, helper=helper) :
             helper.wtnsrXfactors_low[N]
-        core_grad = tensorcontractmatrices!(acquire!(helper, helper.core_dims), core(src), src_factor2s, helper=helper)
-        dest.core .= _spnntucker_project.(prj, src.core .- s .* (core_grad .- tensorXfactors_all),
-                                          s_lambda, bound)
+        core_grad = tensorcontractmatrices!(acquire!(helper, helper.core_dims), src_core, src_factor2s, helper=helper)
+        decomp.core .= _spnntucker_project.(prj, src_core .- s .* (core_grad .- tensorXfactors_all),
+                                            s_lambda, bound)
         (n < N) && release!(helper, tensorXfactors_all) # not acquired if n < N
         release!(helper, core_grad)
     else
         # restore tensor from decomposition replacing the core and n-th factor from src
 	    # FIXME store core*factors(dest, 1:(n-1))
-    	wdecomp_delta = tensorcontractmatrices!(acquire!(helper, size(helper.wtnsr)), core(src),
-        	                                    [factor(i != n ? dest : src, i) for i in 1:N], 1:N, transpose=true, helper=helper)
+    	wdecomp_delta = tensorcontractmatrices!(acquire!(helper, size(helper.wtnsr)), src_core,
+        	                                    factors(decomp), 1:N, transpose=true, helper=helper)
         # subtract tnsr and weight
-	    wdecomp_delta .= (wdecomp_delta .- helper.tnsr) .* helper.tnsr_weights
+	    @inbounds wdecomp_delta .= (wdecomp_delta .- helper.tnsr) .* helper.tnsr_weights
         # convert back to core dimensions
         core_grad = tensorcontractmatrices!(acquire!(helper, helper.core_dims), wdecomp_delta,
-                                            [factor(i != n ? dest : src, i) for i in 1:N], 1:N, transpose=false, helper=helper))
-        dest.core .= _spnntucker_project.(prj, src.core .- s .* core_grad, s_lambda, bound)
+                                            factors(decomp), 1:N, transpose=false, helper=helper))
+        @inbounds decomp.core .= _spnntucker_project.(prj, src_core .- s .* core_grad, s_lambda, bound)
         release!(helper, wdecomp_delta)
         release!(helper, core_grad)
     end
-    return dest
+    return decomp
 end
 
-# update n-th factor matrix of dest
+# update n-th factor matrix of `decomp`
 # return new residual
 function _spnntucker_update_factor!(
-    helper::SPNNTuckerHelper{T,N}, dest::Tucker{T,N}, src::Tucker{T,N},
-    dest_factor2s::Vector{Matrix{T}}, n::Int
+    decomp::Tucker{T,N}, src_factor::StridedMatrix{T},
+    factor2s::Vector{Matrix{T}}, n::Int,
+    helper::SPNNTuckerHelper{T,N}
 ) where {T,N}
-    src_factor = factor(src, n)
-    dest_factor = factor(dest, n)
+    dest_factor = factor(decomp, n)
     lambda = helper.lambdas[n]
     bound = helper.bounds[n]
     helper.L0[n] = helper.L[n]
@@ -141,8 +142,8 @@ function _spnntucker_update_factor!(
     all_but_n = [1:(n-1); (n+1):N]
     cXtf_size = ntuple(i -> i != n ? size(helper.wtnsr, i) : helper.core_dims[n], N)
     coreXtfactor = tensorcontractmatrices!(acquire!(helper, cXtf_size),
-                                           core(dest),
-                                           factors(dest, all_but_n), all_but_n, transpose=true, helper=helper)
+                                           core(decomp),
+                                           factors(decomp, all_but_n), all_but_n, transpose=true, helper=helper)
     coreXtfactor2 = tensorcontract!(1, coreXtfactor, 1:N, 'N',
                                     coreXtfactor, [1:(n-1); N+1; (n+1):N], 'N',
                                      0, acquire!(helper, (helper.core_dims[n], helper.core_dims[n])), [n, N+1], method=:BLAS)
@@ -152,7 +153,7 @@ function _spnntucker_update_factor!(
     if helper.tnsr_weights === nothing
         tnsrXcoreXtfactor = tensorcontract!(1, helper.wtnsr, 1:N, 'N',
                                             coreXtfactor, [1:(n-1); N+1; (n+1):N], 'N',
-                                            0, acquire!(helper, size(factor(dest, n))), [n, N+1], method=:BLAS)::Matrix{T}
+                                            0, acquire!(helper, size(dest_factor)), [n, N+1], method=:BLAS)::Matrix{T}
         factorXcoreXtfactor2 = mul!(acquire!(helper, size(src_factor)), src_factor, coreXtfactor2)
 
         # update Lipschitz constant
@@ -163,7 +164,7 @@ function _spnntucker_update_factor!(
         else
              dest_factor .= max.(src_factor .- s .* (factorXcoreXtfactor2 .- tnsrXcoreXtfactor .+ lambda), zero(T))
         end
-        dest_factor2 = mul!(dest_factor2s[n], dest_factor', dest_factor)
+        dest_factor2 = mul!(factor2s[n], dest_factor', dest_factor)
         factor2XcoreXtfactor2 = dot(dest_factor2, coreXtfactor2)
         factorXtnsrXcoreXtfactor = dot(dest_factor, tnsrXcoreXtfactor)
         release!(helper, coreXtfactor)
@@ -172,7 +173,7 @@ function _spnntucker_update_factor!(
         release!(helper, factorXcoreXtfactor2)
 
         return 0.5*(factor2XcoreXtfactor2-2*factorXtnsrXcoreXtfactor+helper.wtnsr_nrm^2) +
-               _spnntucker_reg_penalty(dest, helper.lambdas)
+               _spnntucker_reg_penalty(decomp, helper.lambdas)
     else
         method = contractmethod(nothing, helper)
         wdecomp_delta = tensorcontractmatrix!(acquire!(helper, size(helper.wtnsr)), coreXtfactor,
@@ -181,9 +182,9 @@ function _spnntucker_update_factor!(
         @inbounds wdecomp_delta .= (wdecomp_delta .- helper.tnsr) .* helper.tnsr_weights
         tnsrXfactors = tensorcontractmatrices!(acquire!(helper, ntuple(i -> i != n ? helper.core_dims[i] : size(helper.wtnsr, i), N)),
                                                wdecomp_delta,
-                                               factors(dest, all_but_n), all_but_n, transpose=false, helper=helper)
+                                               factors(decomp, all_but_n), all_but_n, transpose=false, helper=helper)
         factor_grad = TensorOperations.contract!(
-                1, tnsrXfactors, Val{:N}, core(dest), Val{:N}, 0,
+                1, tnsrXfactors, Val{:N}, core(decomp), Val{:N}, 0,
                 acquire!(helper, size(dest_factor)),
                 (n,), ntuple(i -> i<n ? i : (i+1), N-1),
                 (n,), ntuple(i -> i<n ? i : (i+1), N-1),
@@ -204,8 +205,8 @@ function _spnntucker_update_factor!(
         @inbounds wdecomp_delta .= (wdecomp_delta .- helper.tnsr) .* helper.tnsr_weights
         release!(helper, wdecomp_delta)
         # update dest factor square (used only for L calculation in the weighted case)
-        mul!(dest_factor2s[n], dest_factor', dest_factor)
-        return 0.5*sum(abs2, wdecomp_delta) + _spnntucker_reg_penalty(dest, helper.lambdas)
+        mul!(factor2s[n], dest_factor', dest_factor)
+        return 0.5*sum(abs2, wdecomp_delta) + _spnntucker_reg_penalty(decomp, helper.lambdas)
     end
 end
 
@@ -368,22 +369,26 @@ function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
 
         any_redone = false
         for n in N:-1:1
-            # -- update the core tensor Z --
+            # -- update the core tensor and n-th factor proxies --
             helper.L0[N+1] = helper.L[N+1]
             helper.L[N+1] = max(prod(factor2_nrms), helper.Lmin)
+            _spnntucker_update_proxy_factor!(decomp_p, decomp, decomp0, n, min((t0[n]-1)/t[n], rw*sqrt(helper.L0[n]/helper.L[n])))
+            _spnntucker_update_proxy_core!(decomp_p, decomp, decomp0, min((t0[N+1]-1)/t[N+1], rw*sqrt(helper.L0[N+1]/helper.L[N+1])))
 
             # try to make a step using extrapolated decompositon (Zm,Um)
-            _spnntucker_update_core!(projection_type, helper, decomp, decomp_p, factor2s, n)
-            residn = _spnntucker_update_factor!(helper, decomp, decomp_p, factor2s, n)
+            _spnntucker_update_core!(projection_type, decomp, core(decomp_p), factor2s, n, helper)
+            residn = _spnntucker_update_factor!(decomp, factor(decomp_p, n), factor2s, n, helper)
             redone = residn > residn0
-            while residn > residn0
+            while niter > 1 && residn > residn0
                 # extrapolated Zm,Um decomposition lead to residual norm increase,
                 # revert extrapolation and make a step using Z0,U0 to ensure
                 # objective function is decreased
                 # re-update to make objective nonincreasing
+                helper.L[N+1] = helper.L0[N+1]
+                helper.L[n] = helper.L0[n]
                 copyto!(factor2s[n], factor2s0[n]) # restore factor square, core update needs it
-                _spnntucker_update_core!(projection_type, helper, decomp, decomp0, factor2s, n)
-                residn = _spnntucker_update_factor!(helper, decomp, decomp0, factor2s, n)
+                _spnntucker_update_core!(projection_type, decomp, core(decomp0), factor2s, n, helper)
+                residn = _spnntucker_update_factor!(decomp, factor(decomp0, n), factor2s, n, helper)
                 if residn > residn0
                     verbose && @warn("$niter: residue increase at redo step")
                     if is_adaptive_steps(helper)
@@ -413,10 +418,8 @@ function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
             # --- correction and extrapolation ---
             t[n] = (1.0+sqrt(1.0+4.0*t0[n]^2))/2.0
             #verbose && @info("Updating proxy factors $n...")
-            _spnntucker_update_proxy_factor!(decomp_p, decomp, decomp0, n, min((t0[n]-1)/t[n], rw*sqrt(helper.L0[n]/helper.L[n])))
             t[N+1] = (1.0+sqrt(1.0+4.0*t0[N+1]^2))/2.0
             #verbose && @info("Updating proxy core $n...")
-            _spnntucker_update_proxy_core!(decomp_p, decomp, decomp0, min((t0[N+1]-1)/t[N+1], rw*sqrt(helper.L0[N+1]/helper.L[N+1])))
 
             #verbose && @info("Storing updated core and factors...")
             copyto!(decomp0.core, decomp.core)
