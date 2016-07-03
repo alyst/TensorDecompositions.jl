@@ -366,8 +366,6 @@ function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
     pb = Progress(max_iter, "Alternating proximal gradient iterations ")
     niter = 1
     while !converged
-        update!(pb, niter)
-
         residn0 = resid
         _spnntucker_update_tensorXfactors_low!(helper, decomp0)
 
@@ -455,6 +453,10 @@ function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
             helper.StepMult[N+1] = min(helper.StepMult[N+1] * 1.05, 1.0)
             verbose && @info("Increasing core tensor step multiplier: $(helper.StepMult[N+1])")
         end
+
+        update!(pb, niter, showvalues=[(Symbol("|resid|"), sqrt(2*resid)),
+                                       (Symbol("|resid|/|T|"), cur_state.rel_residue),
+                                       (Symbol("1-|resid[i]|^2/|resid[i-1]|^2"), cur_state.rel_residue_delta)])
 
         # check stopping criterion
         adj_tol = tol * prod(helper.StepMult)^(1/length(helper.StepMult))
