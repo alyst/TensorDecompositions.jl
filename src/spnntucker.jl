@@ -262,14 +262,10 @@ function _spnntucker_update_factor!(prj::Type{Val{PRJ}},
                 src_col = view(src_factor, :, j)
                 dest_col = view(dest_factor, :, j)
                 cXtf_row = view(coreXtfactor_mtx, :, j)
-                @inbounds for i1 in eachindex(dest_col), i2 in eachindex(cXtf_row)
-                    wtnsr_delta_mtx[i2, i1] -= dest_col[i1]*cXtf_row[i2]
-                end
+                BLAS.gemm!('N', 'T', -one(T), cXtf_row, dest_col, one(T), wtnsr_delta_mtx)
                 # subtract j-th dest_factor column × itself from fXf
                 @inbounds dest_factor_cols_sum .-= dest_col # exclude dest_col from L
-                @inbounds for i1 in eachindex(dest_col), i2 in eachindex(dest_col)
-                    fXf_mtx[i2, i1] -= dest_col[i1]*dest_col[i2]
-                end
+                BLAS.gemm!('N', 'T', -one(T), dest_col, dest_col, one(T), fXf_mtx)
 
                 # update Lipschitz constant for orthogonalization term
                 L2 = sum(abs2, dest_factor_cols_sum) *
@@ -287,14 +283,10 @@ function _spnntucker_update_factor!(prj::Type{Val{PRJ}},
                 bound = helper.bounds[n]
                 dest_col .= _spnntucker_project.(prj, k2.*(src_col.*L .- dest_col) .- k1.*tmp_col, lambda, bound)
                 # add updated j-th dest_factor column × j-th row from coreXtfactor2 from factorXcoreXtfactor2
-                @inbounds for i1 in eachindex(dest_col), i2 in eachindex(cXtf_row)
-                    wtnsr_delta_mtx[i2, i1] += dest_col[i1]*cXtf_row[i2]
-                end
+                BLAS.gemm!('N', 'T', one(T), cXtf_row, dest_col, one(T), wtnsr_delta_mtx)
                 # add updated j-th dest_factor column × itself from fXf
                 @inbounds dest_factor_cols_sum .+= dest_col # add updated dest_col to the L
-                @inbounds for i1 in eachindex(dest_col), i2 in eachindex(dest_col)
-                    fXf_mtx[i2, i1] += dest_col[i1]*dest_col[i2]
-                end
+                BLAS.gemm!('N', 'T', one(T), dest_col, dest_col, one(T), fXf_mtx)
             end
             # update dest_factor-dependent fields of decomp
             decomp.L[n] += helper.mus[n]*sqrt(total_L2)
