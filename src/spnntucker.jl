@@ -1,12 +1,12 @@
 """
-State of sparse (semi-)nonnegative Tucker decomposition
+Metrics of sparse (semi-)nonnegative Tucker decomposition progress.
 """
-struct SPNNTuckerState
+struct SPNNTuckerMetrics
     sqr_residue::Float64          # residue, i.e. 0.5 norm(tnsr - recomposed)^2
     rel_residue::Float64          # residue relative to the ||tnsr||
     rel_residue_delta::Float64    # residue delta relative to the current residue
 
-    function SPNNTuckerState(sqr_residue::Float64, prev_sqr_residue::Float64, tnsr_nrm::Float64)
+    function SPNNTuckerMetrics(sqr_residue::Float64, prev_sqr_residue::Float64, tnsr_nrm::Float64)
         sqr_residue < -1E-10*tnsr_nrm^2 && @warn("Negative residue: $sqr_residue")
         sqr_residue = max(0.0, sqr_residue)
         new(sqr_residue, sqrt(2*sqr_residue)/tnsr_nrm, abs(sqr_residue-prev_sqr_residue)/(prev_sqr_residue+1E-5))
@@ -275,7 +275,7 @@ Returns:
     * `:rel_residue` the Frobenius norm of the residual error `l(Z,U)` plus regularization penalty (if any)
     * `:niter` number of iterations
     * `:nredo` number of times `core` and `factor` were recalculated to avoid the increase in objective function
-    * `:iter_diag` convergence info for each iteration, see `SPNNTuckerState`
+    * `:iter_diag` convergence info for each iteration, see `SPNNTuckerMetrics`
 
 The function uses the alternating proximal gradient method to solve the following optimization problem:
  deqn{min 0.5 |tnsr - Z times_1 U_1 ldots times_K U_K |_{F^2} +
@@ -357,7 +357,7 @@ function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
     t0 = fill(1.0, N+1)
     t = deepcopy(t0)
 
-    iter_diag = Vector{SPNNTuckerState}()
+    iter_diag = Vector{SPNNTuckerMetrics}()
     nstall = 0
     nredo = 0
     nnoredo = zeros(Int, N+1)
@@ -446,8 +446,8 @@ function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
         resid = residn0
 
         #verbose && @info("Storing statistics...")
-        cur_state = SPNNTuckerState(resid, resid0, helper.wtnsr_nrm)
-        push!(iter_diag, cur_state)
+        cur_metrics = SPNNTuckerMetrics(resid, resid0, helper.wtnsr_nrm)
+        push!(iter_diag, cur_metrics)
 
         if is_adaptive_steps(helper) && helper.StepMult[N+1] < 1.0 && (nnoredo[N+1] >= 3) && mod(nnoredo[N+1], 3) == 0
             # increase StepMult for the core tensor after 3 successful iterations
@@ -456,28 +456,28 @@ function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
         end
 
         update!(pb, niter, showvalues=[(Symbol("|resid|"), sqrt(2*resid)),
-                                       (Symbol("|resid|/|T|"), cur_state.rel_residue),
-                                       (Symbol("1-|resid[i]|^2/|resid[i-1]|^2"), cur_state.rel_residue_delta)])
+                                       (Symbol("|resid|/|T|"), cur_metrics.rel_residue),
+                                       (Symbol("1-|resid[i]|^2/|resid[i-1]|^2"), cur_metrics.rel_residue_delta)])
 
         # check stopping criterion
         adj_tol = tol * prod(helper.StepMult)^(1/length(helper.StepMult))
         niter += 1
-        nstall = cur_state.rel_residue_delta < adj_tol ? nstall + 1 : 0
-        if nstall >= 3 || cur_state.rel_residue < adj_tol
-            verbose && (cur_state.rel_residue == 0.0) && @info("Residue is zero. Exact decomposition was found")
+        nstall = cur_metrics.rel_residue_delta < adj_tol ? nstall + 1 : 0
+        if nstall >= 3 || cur_metrics.rel_residue < adj_tol
+            verbose && (cur_metrics.rel_residue == 0.0) && @info("Residue is zero. Exact decomposition was found")
             verbose && (nstall >= 3) && @info("Decrease of the relative error is below $adj_tol $nstall times in a row")
-            verbose && (cur_state.rel_residue < adj_tol) && @info("Relative error is $(cur_state.rel_residue) times below input tensor norm")
+            verbose && (cur_metrics.rel_residue < adj_tol) && @info("Relative error is $(cur_metrics.rel_residue) times below input tensor norm")
             verbose && @info("spnntucker() converged in $niter iteration(s), $nredo redo steps")
             converged = true
             finish!(pb)
             break
         elseif (max_time > 0) && ((time() - start_time) > max_time)
             cancel(pb, "Maximal time exceeded, might be not an optimal solution")
-            verbose && @info("Final relative error $(cur_state.rel_residue)")
+            verbose && @info("Final relative error $(cur_metrics.rel_residue)")
             break
         elseif niter == max_iter
             cancel(pb, "Maximal number of iterations reached, might be not an optimal solution")
-            verbose && @info("Final relative error $(cur_state.rel_residue)")
+            verbose && @info("Final relative error $(cur_metrics.rel_residue)")
             break
         end
     end # iterations
