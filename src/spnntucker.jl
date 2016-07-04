@@ -315,6 +315,7 @@ function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
         ini_decomp = hosvd(tnsr, core_dims, pad_zeros=true)
         rescale_ini = true
     elseif isa(ini_decomp, Tucker{T,N})
+        ini_decomp = deepcopy(ini_decomp)
         rescale_ini = false
     else
         throw(ArgumentError("Incorrect ini_decomp value"))
@@ -328,11 +329,11 @@ function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
                               tensor_weights=tensor_weights, verbose = verbose)
     verbose && @info("|tensor|=$(helper.wtnsr_nrm)")
 
-    decomp0 = deepcopy(ini_decomp)
     if rescale_ini
         verbose && @info("Rescaling initial decomposition...")
-        rescale!(decomp0, helper.wtnsr_nrm)
+        rescale!(ini_decomp, helper.wtnsr_nrm)
     end
+    decomp0 = ini_decomp
     decomp = deepcopy(decomp0)     # current decomposition
     decomp_p = deepcopy(decomp0)   # proxy decomposition
 
