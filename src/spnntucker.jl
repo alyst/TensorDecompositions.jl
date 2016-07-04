@@ -372,11 +372,24 @@ function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
 
         any_redone = false
         for n in N:-1:1
+            # --- correction and extrapolation ---
+            t[n] = (1.0+sqrt(1.0+4.0*t0[n]^2))/2.0
+            #verbose && info("Updating proxy factors $n...")
+            t[N+1] = (1.0+sqrt(1.0+4.0*t0[N+1]^2))/2.0
             # -- update the core tensor and n-th factor proxies --
+            _spnntucker_update_proxy_factor!(decomp_p, decomp, decomp0, n,
+                                             min((t0[n]-1)/t[n], rw*sqrt(helper.L0[n]/helper.L[n])))
+            _spnntucker_update_proxy_core!(decomp_p, decomp, decomp0,
+                                           min((t0[N+1]-1)/t[N+1], rw*sqrt(helper.L0[N+1]/helper.L[N+1])))
+            t0[n] = t[n]
+            t0[N+1] = t[N+1]
             helper.L0[N+1] = helper.L[N+1]
             helper.L[N+1] = max(prod(factor2_nrms), helper.Lmin)
-            _spnntucker_update_proxy_factor!(decomp_p, decomp, decomp0, n, min((t0[n]-1)/t[n], rw*sqrt(helper.L0[n]/helper.L[n])))
-            _spnntucker_update_proxy_core!(decomp_p, decomp, decomp0, min((t0[N+1]-1)/t[N+1], rw*sqrt(helper.L0[N+1]/helper.L[N+1])))
+            copyto!(decomp0.core, decomp.core)
+            copyto!(decomp0.factors[n], decomp.factors[n])
+            copyto!(factor2s0[n], factor2s[n])
+            factor2_nrms[n] = norm(factor2s[n])
+            residn0 = residn
 
             # try to make a step using extrapolated decompositon (Zm,Um)
             _spnntucker_update_core!(helper.proj_types[N+1], decomp, core(decomp_p), factor2s, n, helper)
@@ -390,6 +403,7 @@ function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
                 helper.L[N+1] = helper.L0[N+1]
                 helper.L[n] = helper.L0[n]
                 copyto!(factor2s[n], factor2s0[n]) # restore factor square, core update needs it
+                factor2_nrms[n] = norm(factor2s[n])
                 _spnntucker_update_core!(helper.proj_types[N+1], decomp, core(decomp0), factor2s, n, helper)
                 residn = _spnntucker_update_factor!(helper.proj_types[n], decomp, factor(decomp0, n), factor2s, n, helper)
                 if residn > residn0
@@ -418,20 +432,6 @@ function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
                 nnoredo[n] += 1
             end
 
-            # --- correction and extrapolation ---
-            t[n] = (1.0+sqrt(1.0+4.0*t0[n]^2))/2.0
-            #verbose && @info("Updating proxy factors $n...")
-            t[N+1] = (1.0+sqrt(1.0+4.0*t0[N+1]^2))/2.0
-            #verbose && @info("Updating proxy core $n...")
-
-            #verbose && @info("Storing updated core and factors...")
-            copyto!(decomp0.core, decomp.core)
-            copyto!(decomp0.factors[n], decomp.factors[n])
-            copyto!(factor2s0[n], factor2s[n])
-            factor2_nrms[n] = norm(factor2s[n])
-            t0[n] = t[n]
-            t0[N+1] = t[N+1]
-            residn0 = residn
             # update StepMult[n]
             if is_adaptive_steps(helper) && helper.StepMult[n] < 1.0 && (nnoredo[n] >= 3) && mod(nnoredo[n], 3) == 0
                 # increase StepMult for the n-th factor after 3 successful iterations
