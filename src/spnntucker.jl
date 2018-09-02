@@ -128,7 +128,7 @@ function _spnntucker_update_factor!(
     bound = helper.bounds[n]
     @assert size(dest_factor) == size(src_factor) == size(factorXcoreXtfactor2) == size(tnsrXcoreXtfactor)
     @inbounds if lambda == 0 && isfinite(bound)
-        dest_factor .= clamp.(src_factor .- s .* (factorXcoreXtfactor2 .- tnsrXcoreXtfactor), zero(T), bound)
+        dest_factor .= min.(src_factor .- s .* (factorXcoreXtfactor2 .- tnsrXcoreXtfactor), bound)
     else
         dest_factor .= max.(src_factor .- s .* (factorXcoreXtfactor2 .- tnsrXcoreXtfactor .+ lambda), zero(T))
     end
