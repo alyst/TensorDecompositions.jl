@@ -293,7 +293,8 @@ See http://www.caam.rice.edu/~optimization/bcu/`
 """
 function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
                     tensor_weights::Union{StridedArray{T, N}, Nothing} = nothing,
-                    core_nonneg::Bool=true, tol::Float64=1e-4, hosvd_init::Bool=false,
+                    core_nonneg::Bool=true, factor_nonneg::Union{AbstractVector{Bool}, Nothing} = nothing,
+                    tol::Float64=1e-4, hosvd_init::Bool=false,
                     max_iter::Int=500, max_time::Float64=0.0,
                     lambdas::Vector{Float64} = fill(0.0, N+1),
                     Lmin::Float64 = 1.0, adaptive_steps::Bool=false, step_mult_min::Float64=1E-3,
@@ -320,8 +321,10 @@ function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
     end
 
     #verbose && @info("Initializing helper object...")
-    helper = SPNNTuckerHelper(tnsr, core_dims, lambdas, bounds,
-                              [fill(true, N); core_nonneg], Lmin, adaptive_steps ? step_mult_min : 1.0,
+    helper = SPNNTuckerHelper(tnsr, core_dims,
+                              Bool[factor_nonneg !== nothing ? factor_nonneg : fill(true, N); core_nonneg],
+                              lambdas, bounds,
+                              Lmin, adaptive_steps ? step_mult_min : 1.0,
                               tensor_weights=tensor_weights, verbose = verbose)
     verbose && @info("|tensor|=$(helper.wtnsr_nrm)")
 
