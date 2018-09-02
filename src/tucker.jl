@@ -39,7 +39,7 @@ Composes a full tensor from Tucker decomposition.
 """
 compose(decomp::Tucker) = tensorcontractmatrices(core(decomp), factors(decomp), transpose=true)
 
-compose!(dest::Array{T,N}, decomp::Tucker{T,N}) where {T,N} = tensorcontractmatrices!(dest, core(decomp), factors(decomp), transpose=true)
+compose!(dest::StridedArray{T,N}, decomp::Tucker{T,N}) where {T,N} = tensorcontractmatrices!(dest, core(decomp), factors(decomp), transpose=true)
 
 """
 Scale the factors and core of the initial decomposition.
