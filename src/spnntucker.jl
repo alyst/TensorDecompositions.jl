@@ -416,6 +416,7 @@ function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
                     tol::Float64=1e-4, hosvd_init::Bool=false,
                     max_iter::Int=500, max_time::Float64=0.0,
                     lambdas::Vector{Float64} = fill(0.0, N+1),
+                    fixed_factors::Union{Vector, Nothing} = nothing,
                     mus::Vector{Float64} = fill(0.0, N),
                     Lmin::Float64 = 1.0, adaptive_steps::Bool=false, step_mult_min::Float64=1E-3,
                     rw::Float64=0.9999,
@@ -439,6 +440,25 @@ function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
         rescale_ini = false
     else
         throw(ArgumentError("Incorrect ini_decomp value"))
+    end
+    # assign known factors
+    isfixf = fill(false, N)
+    if fixed_factors isa AbstractVector
+        length(fixed_factors) == N || throw(ArgumentError("Length of fixed factors array ($(length(fixed_factors))) should be $N"))
+        for (i, fixf) in enumerate(fixed_factors)
+            fixf === nothing && continue # not specified
+            if fixf isa AbstractMatrix
+                inif = factor(ini_decomp, i)
+                size(fixf) == size(inif) || throw(ArgumentError("Factor #$i is $(size(fixf,1))×$(size(fifx,2)) matrix, should be $(size(inif,1))×$(size(inif,2))"))
+                copyto!(inif, fixf)
+                isfixf[i] = true
+                verbose && @info("Fixing decomposition factor #$i to the user specified matrix")
+            else
+                throw(ArgumentError("Factor #$i should be either nothing or a matrix, $(typeof(fixf)) given"))
+            end
+        end
+    elseif fixed_factors !== nothing
+        throw(ArgumentError("fixed_factors should be nothing or a vector, $(typeof(fixed_factors)) given"))
     end
 
     #verbose && @info("Initializing helper object...")
@@ -496,7 +516,7 @@ function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
 
             # try to make a step using extrapolated decompositon (Zm,Um)
             _spnntucker_update_core!(helper.proj_types[N+1], decomp, core(decomp_p), n, helper)
-            _spnntucker_update_factor!(helper.proj_types[n], decomp, factor(decomp_p, n), n, helper)
+            isfixf[n] || _spnntucker_update_factor!(helper.proj_types[n], decomp, factor(decomp_p, n), n, helper)
             redone = decomp.resid > decomp0.resid
             while niter > 1 && decomp.resid > decomp0.resid
                 # extrapolated Zm,Um decomposition lead to residual norm increase,
@@ -505,7 +525,7 @@ function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
                 # re-update to make objective nonincreasing
                 copy_core_and_factor!(decomp, decomp0, n)
                 _spnntucker_update_core!(helper.proj_types[n], decomp, core(decomp0), n, helper)
-                _spnntucker_update_factor!(helper.proj_types[n], decomp, factor(decomp0, n), n, helper)
+                isfixf[n] || _spnntucker_update_factor!(helper.proj_types[n], decomp, factor(decomp0, n), n, helper)
                 if decomp.resid > decomp0.resid
                     verbose && @warn("$niter: residue increase at redo step")
                     if is_adaptive_steps(helper)
