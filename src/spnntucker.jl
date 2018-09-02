@@ -17,7 +17,7 @@ end
 """
 Helper object for spnntucker().
 """
-struct SPNNTuckerHelper{T<:Number, N}
+struct SPNNTuckerHelper{T<:Number, N} <: TensorOpHelper{T}
     tnsr::Array{T, N}
     tnsr_nrm::Float64
     core_dims::NTuple{N,Int}
@@ -43,9 +43,6 @@ struct SPNNTuckerHelper{T<:Number, N}
     end
 end
 
-acquire!(helper::SPNNTuckerHelper, size) = acquire!(helper.arr_pool, size)
-release!(helper::SPNNTuckerHelper, size) = release!(helper.arr_pool, size)
-
 function _spnntucker_update_tensorXfactors_low!(helper::SPNNTuckerHelper{T,N}, decomp::Tucker{T,N}) where {T,N}
     tensorcontractmatrix!(helper.tnsrXfactors_low[1], helper.tnsr,
                           factor(decomp, 1), 1)
@@ -61,7 +58,7 @@ function _spnntucker_factor_grad_components!(helper::SPNNTuckerHelper{T,N}, deco
     cXa_size = (size(helper.tnsr)[1:n-1]..., helper.core_dims[n], size(helper.tnsr)[(n+1):N]...)
     coreXantifactor = tensorcontractmatrices!(acquire!(helper, cXa_size),
                                               core(decomp),
-                                              factors(decomp, all_but_n), all_but_n, pool=helper.arr_pool, transpose=true)
+                                              factors(decomp, all_but_n), all_but_n, transpose=true, helper=helper)
     cXa2 = tensorcontract!(1, coreXantifactor, 1:N, 'N',
                     coreXantifactor, [1:(n-1); N+1; (n+1):N], 'N',
                     0, acquire!(helper, (helper.core_dims[n], helper.core_dims[n])), [n, N+1], method=:BLAS)
@@ -97,10 +94,10 @@ function _spnntucker_update_core!(prj::Type{Val{PRJ}},
 
     tensorXfactors_all = n < N ?
         tensorcontractmatrices!(acquire!(helper, helper.core_dims),
-                                helper.tnsrXfactors_low[n], dest.factors[(n+1):N], (n+1):N, pool=helper.arr_pool) :
+                                helper.tnsrXfactors_low[n], dest.factors[(n+1):N], (n+1):N, helper=helper) :
         helper.tnsrXfactors_low[N]
     s = (1.0/helper.L[N+1])
-    core_grad = tensorcontractmatrices!(acquire!(helper, helper.core_dims), core(src), src_factor2s, pool=helper.arr_pool)
+    core_grad = tensorcontractmatrices!(acquire!(helper, helper.core_dims), core(src), src_factor2s, helper=helper)
     s_lambda = (helper.lambdas[N+1]/helper.L[N+1])::Float64
     bound = helper.bounds[N+1]
     dest.core .= _spnntucker_project.(prj, src.core .- s .* (core_grad .- tensorXfactors_all),

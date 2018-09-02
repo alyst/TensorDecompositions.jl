@@ -48,15 +48,35 @@
         factors = TensorDecompositions._random_factors(size(T), (5, 2, 6))
         res = @inferred tensorcontractmatrices(T, factors)
         @test size(res) == (5, 2, 6)
+
+        res2 = @inferred tensorcontractmatrices(T, factors[[2, 1]], [2, 1])
+        @test size(res2) == (5, 2, 30)
     end
 
-    @testset "tensorcontractmatrices!() with pool" do
-        pool = TensorDecompositions.ArrayPool{Float64}()
+    @testset "tensorcontractmatrices!() with TensorOpHelper" begin
+        helper0 = TensorDecompositions.TensorOpHelper{Float64}(use_pool=false)
+        @test helper0 isa TensorDecompositions.SimpleTensorOpHelper
+        @test TensorDecompositions.arraypool(helper0) === nothing
+        helper = TensorDecompositions.TensorOpHelper{Float64}()
+        @test helper isa TensorDecompositions.SimpleTensorOpHelper
+        @test eltype(helper) == Float64
+        @test TensorDecompositions.arraypool(helper) isa TensorDecompositions.ArrayPool
+        @test TensorDecompositions.contractmethod(nothing, helper) == :BLAS
+        @test TensorDecompositions.contractmethod(:native, helper) == :native
         factors = TensorDecompositions._random_factors(size(T), (5, 2, 6))
-        dest = TensorDecompositions.acquire!(pool, (5, 2, 6))
-        res = tensorcontractmatrices!(dest, T, factors, 1:3, pool=pool)
-        @test res == dest
-        TensorDecompositions.release!(pool, dest)
+        dest = @inferred TensorDecompositions.acquire!(helper, (5, 2, 6))
+        res = @inferred tensorcontractmatrices!(dest, T, factors, 1:3, transpose=false, helper=helper)
+        @test res === dest
+        res2 = @inferred tensorcontractmatrices(T, factors, 1:3, transpose=false)
+        @test res == res2
+        TensorDecompositions.release!(helper, dest)
+
+        dest2 = @inferred TensorDecompositions.acquire!(helper, (5, 20, 6))
+        res3 = @inferred tensorcontractmatrices!(dest2, T, factors[[1,3]], [1,3], transpose=false, helper=helper)
+        @test res3 === dest2
+        res4 = @inferred tensorcontractmatrices(T, factors[[1,3]], [1,3], transpose=false)
+        @test res4 == res3
+        TensorDecompositions.release!(helper, dest2)
     end
 
 end

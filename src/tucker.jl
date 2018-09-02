@@ -37,9 +37,14 @@ factors(decomp::Tucker, ixs) = decomp.factors[ixs]
 """
 Composes a full tensor from Tucker decomposition.
 """
-compose(decomp::Tucker) = tensorcontractmatrices(core(decomp), factors(decomp), transpose=true)
+compose(decomp::Tucker{T}; helper::Union{TensorOpHelper{T}, Nothing} = nothing) where {T,N} =
+    tensorcontractmatrices(core(decomp), factors(decomp),
+                           transpose=true, helper=helper)
 
-compose!(dest::StridedArray{T,N}, decomp::Tucker{T,N}) where {T,N} = tensorcontractmatrices!(dest, core(decomp), factors(decomp), transpose=true)
+compose!(dest::StridedArray{T,N}, decomp::Tucker{T,N};
+         helper::Union{TensorOpHelper{T}, Nothing} = nothing) where {T,N} =
+    tensorcontractmatrices!(dest, core(decomp), factors(decomp),
+                            transpose=true, helper=helper)
 
 """
 Scale the factors and core of the initial decomposition.
