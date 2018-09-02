@@ -15,6 +15,39 @@ struct SPNNTuckerState
 end
 
 """
+Determine projection type
+"""
+function _spnntucker_projection_type(is_nonneg::Bool, lambda::Number, bound::Number)
+    if is_nonneg
+        if lambda > 0.0
+            # regularization
+            return isfinite(bound) ? :NonnegRegBounded : :NonnegReg
+        else
+            return isfinite(bound) ? :NonnegBounded : :Nonneg
+        end
+    else
+        if lambda > 0.0
+            # regularization
+            return isfinite(bound) ? :SignedRegBounded : :SignedReg
+        else
+            return isfinite(bound) ? :SignedBounded : :Unbounded
+        end
+    end
+end
+
+_spnntucker_project(::Type{Val{PRJ}}, x, lambda, bound) where PRJ = throw(ArgumentError("Unknown project type: $PRJ"))
+
+_spnntucker_project(::Type{Val{:Nonneg}}, x, lambda, bound) = max(x, 0.0)
+_spnntucker_project(::Type{Val{:NonnegReg}}, x, lambda, bound) = max(x - lambda, 0.0)
+_spnntucker_project(::Type{Val{:NonnegBounded}}, x, lambda, bound) = clamp(x, 0.0, bound)
+_spnntucker_project(::Type{Val{:NonnegRegBounded}}, x, lambda, bound) = clamp(x - lambda, 0.0, bound)
+
+_spnntucker_project(::Type{Val{:Unbounded}}, x, lambda, bound) = x
+_spnntucker_project(::Type{Val{:SignedReg}}, x, lambda, bound) = x > lambda ? x - lambda : (x < -lambda ? x + lambda : 0.0)
+_spnntucker_project(::Type{Val{:SignedBounded}}, x, lambda, bound) = x > bound ? bound : (x < -bound ? -bound : x)
+_spnntucker_project(::Type{Val{:SignedRegBounded}}, x, lambda, bound) = clamp(x > lambda ? x - lambda : (x < -lambda ? x + lambda : 0.0), -bound, bound)
+
+"""
 Helper object for spnntucker().
 """
 mutable struct SPNNTuckerHelper{T<:Number, N} <: TensorOpHelper{T}
@@ -24,6 +57,7 @@ mutable struct SPNNTuckerHelper{T<:Number, N} <: TensorOpHelper{T}
     wtnsr_nrm::Float64          # norm of the weighted tnsr
     core_dims::NTuple{N,Int}
     wtnsrXfactors_low::Vector{Array{T, N}}
+    proj_types::Vector{Type}
     lambdas::Vector{T}
     bounds::Vector{T}
     Lmin::Float64
@@ -35,6 +69,7 @@ mutable struct SPNNTuckerHelper{T<:Number, N} <: TensorOpHelper{T}
     arr_pool::ArrayPool{T}
 
     function SPNNTuckerHelper(tnsr::Array{T,N}, core_dims::NTuple{N,Int},
+                              is_nonneg::Vector{Bool},
                               lambdas::Vector{Float64}, bounds::Vector{T},
                               Lmin::Float64, StepMultMin::Float64;
                               tensor_weights::Union{Array{T,N}, Nothing} = nothing,
@@ -50,9 +85,11 @@ mutable struct SPNNTuckerHelper{T<:Number, N} <: TensorOpHelper{T}
             isfinite(w_max) || throw(ArgumentError("Tensor weights not finite"))
             wtnsr = tnsr .* (tensor_weights ./ w_max)
         end
+        # determine projection types
+        proj_types = Type[Val{_spnntucker_projection_type(is_nonneg[i], lambdas[i], bounds[i])} for i in 1:(N+1)]
         new{T,N}(tnsr, tensor_weights, wtnsr, norm(wtnsr), core_dims,
                  [Array{T,N}(undef, ntuple(i -> i <= n ? core_dims[i] : tnsr_dims[i], N)) for n in 1:N],
-                 lambdas, bounds,
+                 proj_types, lambdas, bounds,
                  Lmin, fill(1.0, N+1), fill(1.0, N+1),
                  StepMultMin, fill(1.0, N+1),
                  ArrayPool{T}()
@@ -79,16 +116,6 @@ function _spnntucker_reg_penalty(decomp::Tucker{T,N}, lambdas::Vector{T}) where 
     end
     return res + (lambdas[N+1] > 0.0 ? (lambdas[N+1] * sum(abs, core(decomp))) : 0.0)
 end
-
-_spnntucker_project(::Type{Val{PRJ}}, x, lambda, bound) where {PRJ} = throw(ArgumentError("Unknown project type: $PRJ"))
-
-_spnntucker_project(::Type{Val{:Nonneg}}, x, lambda, bound) = max(x, 0.0)
-_spnntucker_project(::Type{Val{:NonnegReg}}, x, lambda, bound) = max(x - lambda, 0.0)
-_spnntucker_project(::Type{Val{:NonnegBounded}}, x, lambda, bound) = clamp(x, 0.0, bound)
-
-_spnntucker_project(::Type{Val{:Unbounded}}, x, lambda, bound) = x
-_spnntucker_project(::Type{Val{:SignedReg}}, x, lambda, bound) = x > lambda ? x - lambda : (x < -lambda ? x + lambda : 0.0)
-_spnntucker_project(::Type{Val{:SignedBounded}}, x, lambda, bound) = x > bound ? bound : (x < -bound ? -bound : x)
 
 # update core tensor of `decomp`
 function _spnntucker_update_core!(prj::Type{Val{PRJ}},
@@ -129,13 +156,12 @@ end
 
 # update n-th factor matrix of `decomp`
 # return new residual
-function _spnntucker_update_factor!(
+function _spnntucker_update_factor!(prj::Type{Val{PRJ}},
     decomp::Tucker{T,N}, src_factor::StridedMatrix{T},
     factor2s::Vector{Matrix{T}}, n::Int,
     helper::SPNNTuckerHelper{T,N}
-) where {T,N}
+) where {T,N,PRJ}
     dest_factor = factor(decomp, n)
-    lambda = helper.lambdas[n]
     bound = helper.bounds[n]
     helper.L0[n] = helper.L[n]
 
@@ -159,11 +185,9 @@ function _spnntucker_update_factor!(
         # update Lipschitz constant
         # update n-th factor matrix
         @assert size(dest_factor) == size(src_factor) == size(factorXcoreXtfactor2) == size(tnsrXcoreXtfactor)
-        @inbounds if lambda == 0 && isfinite(bound)
-             dest_factor .= min.(src_factor .- s .* (factorXcoreXtfactor2 .- tnsrXcoreXtfactor), bound)
-        else
-             dest_factor .= max.(src_factor .- s .* (factorXcoreXtfactor2 .- tnsrXcoreXtfactor .+ lambda), zero(T))
-        end
+        lambda = s*helper.lambdas[n]
+        @inbounds dest_factor .= _spnntucker_project.(prj, src_factor .- s .* (factorXcoreXtfactor2 .- tnsrXcoreXtfactor),
+                                                      lambda, bound)
         dest_factor2 = mul!(factor2s[n], dest_factor', dest_factor)
         factor2XcoreXtfactor2 = dot(dest_factor2, coreXtfactor2)
         factorXtnsrXcoreXtfactor = dot(dest_factor, tnsrXcoreXtfactor)
@@ -190,12 +214,10 @@ function _spnntucker_update_factor!(
                 (n,), ntuple(i -> i<n ? i : (i+1), N-1),
                 (1, 2), Val{method})
 
+        lambda = s*helper.lambdas[n]
         @assert size(src_factor) == size(factor_grad)
-        @inbounds if lambda == 0 && isfinite(bound)
-             dest_factor .= min.(src_factor .- s .* factor_grad, bound)
-        else
-             dest_factor .= max.(src_factor .- s .* (factor_grad .+ lambda), zero(T))
-        end
+        @inbounds dest_factor .= _spnntucker_project.(prj, src_factor .- s .* factor_grad,
+                                                      lambda, bound)
         release!(helper, coreXtfactor)
         release!(helper, coreXtfactor2)
         release!(helper, tnsrXfactors)
@@ -281,27 +303,6 @@ function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
     start_time = time()
 
     # define "kernel" functions for "fixing" the core tensor after iteration
-    core_bound = bounds[N+1]
-    core_lambda = lambdas[N+1]
-    if core_nonneg
-        if core_lambda > 0.0
-            # regularization
-            projection_type = Val{:NonnegReg}
-        elseif isfinite(core_bound)
-            projection_type = Val{:NonnegBounded}
-        else
-            projection_type = Val{:Nonneg}
-        end
-    else
-        if core_lambda > 0.0
-            # regularization
-            projection_type = Val{:SignedReg}
-        elseif isfinite(core_bound)
-            projection_type = Val{:SignedBounded}
-        else
-            projection_type = Val{:Unbounded}
-        end
-    end
 
     if ini_decomp === nothing
         verbose && @info("Generating random initial factor matrices and core tensor estimates...")
@@ -320,7 +321,7 @@ function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
 
     #verbose && @info("Initializing helper object...")
     helper = SPNNTuckerHelper(tnsr, core_dims, lambdas, bounds,
-                              Lmin, adaptive_steps ? step_mult_min : 1.0,
+                              [fill(true, N); core_nonneg], Lmin, adaptive_steps ? step_mult_min : 1.0,
                               tensor_weights=tensor_weights, verbose = verbose)
     verbose && @info("|tensor|=$(helper.wtnsr_nrm)")
 
@@ -376,8 +377,8 @@ function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
             _spnntucker_update_proxy_core!(decomp_p, decomp, decomp0, min((t0[N+1]-1)/t[N+1], rw*sqrt(helper.L0[N+1]/helper.L[N+1])))
 
             # try to make a step using extrapolated decompositon (Zm,Um)
-            _spnntucker_update_core!(projection_type, decomp, core(decomp_p), factor2s, n, helper)
-            residn = _spnntucker_update_factor!(decomp, factor(decomp_p, n), factor2s, n, helper)
+            _spnntucker_update_core!(helper.proj_types[N+1], decomp, core(decomp_p), factor2s, n, helper)
+            residn = _spnntucker_update_factor!(helper.proj_types[n], decomp, factor(decomp_p, n), factor2s, n, helper)
             redone = residn > residn0
             while niter > 1 && residn > residn0
                 # extrapolated Zm,Um decomposition lead to residual norm increase,
@@ -387,8 +388,8 @@ function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
                 helper.L[N+1] = helper.L0[N+1]
                 helper.L[n] = helper.L0[n]
                 copyto!(factor2s[n], factor2s0[n]) # restore factor square, core update needs it
-                _spnntucker_update_core!(projection_type, decomp, core(decomp0), factor2s, n, helper)
-                residn = _spnntucker_update_factor!(decomp, factor(decomp0, n), factor2s, n, helper)
+                _spnntucker_update_core!(helper.proj_types[N+1], decomp, core(decomp0), factor2s, n, helper)
+                residn = _spnntucker_update_factor!(helper.proj_types[n], decomp, factor(decomp0, n), factor2s, n, helper)
                 if residn > residn0
                     verbose && @warn("$niter: residue increase at redo step")
                     if is_adaptive_steps(helper)
