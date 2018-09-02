@@ -19,9 +19,11 @@ Helper object for spnntucker().
 """
 struct SPNNTuckerHelper{T<:Number, N} <: TensorOpHelper{T}
     tnsr::Array{T, N}
-    tnsr_nrm::Float64
+    tnsr_weights::Union{Array{T, N}, Nothing}   # weights of `tnsr` elements
+    wtnsr::Array{T, N}          # weighted `tnsr` (or `tnsr` if no weights)
+    wtnsr_nrm::Float64          # norm of the weighted tnsr
     core_dims::NTuple{N,Int}
-    tnsrXfactors_low::Vector{Array{T, N}}
+    wtnsrXfactors_low::Vector{Array{T, N}}
     lambdas::Vector{T}
     bounds::Vector{T}
     Lmin::Float64
@@ -32,10 +34,21 @@ struct SPNNTuckerHelper{T<:Number, N} <: TensorOpHelper{T}
 
     function SPNNTuckerHelper(tnsr::Array{T,N}, core_dims::NTuple{N,Int},
                               lambdas::Vector{Float64}, bounds::Vector{T},
-                              Lmin::Float64; verbose::Bool=false) where {T, N}
+                              Lmin::Float64;
+                              tensor_weights::Union{Array{T,N}, Nothing} = nothing,
+                              verbose::Bool=false) where {T, N}
         verbose && @info("Precomputing input tensor unfoldings...")
         tnsr_dims = size(tnsr)
-        new{T,N}(tnsr, norm(tnsr), core_dims,
+        if tensor_weights === nothing
+            wtnsr = tnsr
+        else
+            (tnsr_dims == size(tensor_weights)) || throw(DimensionMismatch("Shapes of tnsr and its weights do not match"))
+            w_min, w_max = extrema(tensor_weights)
+            (w_min >= 0) || throw(ArgumentError("Tensor weights should be non-negative"))
+            isfinite(w_max) || throw(ArgumentError("Tensor weights not finite"))
+            wtnsr = tnsr .* (tensor_weights ./ w_max)
+        end
+        new{T,N}(tnsr, tensor_weights, wtnsr, norm(wtnsr), core_dims,
                  [Array{T,N}(undef, ntuple(i -> i <= n ? core_dims[i] : tnsr_dims[i], N)) for n in 1:N],
                  lambdas, bounds,
                  Lmin, fill(1.0, N+1), fill(1.0, N+1), ArrayPool{T}()
@@ -44,29 +57,13 @@ struct SPNNTuckerHelper{T<:Number, N} <: TensorOpHelper{T}
 end
 
 function _spnntucker_update_tensorXfactors_low!(helper::SPNNTuckerHelper{T,N}, decomp::Tucker{T,N}) where {T,N}
-    tensorcontractmatrix!(helper.tnsrXfactors_low[1], helper.tnsr,
+    tensorcontractmatrix!(helper.wtnsrXfactors_low[1], helper.wtnsr,
                           factor(decomp, 1), 1)
     for n in 2:N
-        tensorcontractmatrix!(helper.tnsrXfactors_low[n],
-                              helper.tnsrXfactors_low[n-1], factor(decomp, n), n)
+        tensorcontractmatrix!(helper.wtnsrXfactors_low[n],
+                              helper.wtnsrXfactors_low[n-1], factor(decomp, n), n)
     end
     return helper
-end
-
-function _spnntucker_factor_grad_components!(helper::SPNNTuckerHelper{T,N}, decomp::Tucker{T,N}, n::Int) where {T,N}
-    all_but_n = [1:(n-1); (n+1):N]
-    cXtf_size = ntuple(i -> i != n ? size(helper.tnsr, i) : helper.core_dims[n], N)
-    coreXtfactor = tensorcontractmatrices!(acquire!(helper, cXtf_size),
-                                           core(decomp),
-                                           factors(decomp, all_but_n), all_but_n, transpose=true, helper=helper)
-    cXtf2 = tensorcontract!(1, coreXtfactor, 1:N, 'N',
-                            coreXtfactor, [1:(n-1); N+1; (n+1):N], 'N',
-                            0, acquire!(helper, (helper.core_dims[n], helper.core_dims[n])), [n, N+1], method=:BLAS)
-    tXcXtf = tensorcontract!(1, helper.tnsr, 1:N, 'N',
-                             coreXtfactor, [1:(n-1); N+1; (n+1):N], 'N',
-                             0, acquire!(helper, size(factor(decomp, n))), [n, N+1], method=:BLAS)
-    release!(helper, coreXtfactor)
-    return cXtf2, tXcXtf
 end
 
 function _spnntucker_reg_penalty(decomp::Tucker{T,N}, lambdas::Vector{T}) where {T,N}
@@ -90,20 +87,36 @@ _spnntucker_project(::Type{Val{:SignedBounded}}, x, lambda, bound) = x > bound ?
 # update core tensor of dest
 function _spnntucker_update_core!(prj::Type{Val{PRJ}},
     helper::SPNNTuckerHelper{T,N}, dest::Tucker{T,N}, src::Tucker{T,N},
-    src_factor2s::Vector{Matrix{T}}, n::Integer) where {T,N,PRJ}
-
-    tensorXfactors_all = n < N ?
-        tensorcontractmatrices!(acquire!(helper, helper.core_dims),
-                                helper.tnsrXfactors_low[n], dest.factors[(n+1):N], (n+1):N, helper=helper) :
-        helper.tnsrXfactors_low[N]
+    src_factor2s::Vector{Matrix{T}}, n::Integer
+) where {T,N,PRJ}
     s = (one(T)/helper.L[N+1])
-    core_grad = tensorcontractmatrices!(acquire!(helper, helper.core_dims), core(src), src_factor2s, helper=helper)
-    s_lambda = (helper.lambdas[N+1]/helper.L[N+1])::Float64
+    s_lambda = (helper.lambdas[N+1]/helper.L[N+1])
     bound = helper.bounds[N+1]
-    dest.core .= _spnntucker_project.(prj, src.core .- s .* (core_grad .- tensorXfactors_all),
-                                      s_lambda, bound)
-    (n < N) && release!(helper, tensorXfactors_all) # not acquired if n < N
-    release!(helper, core_grad)
+
+    if helper.tnsr_weights === nothing
+        tensorXfactors_all = n < N ?
+            tensorcontractmatrices!(acquire!(helper, helper.core_dims),
+                                    helper.wtnsrXfactors_low[n], dest.factors[(n+1):N], (n+1):N, helper=helper) :
+            helper.wtnsrXfactors_low[N]
+        core_grad = tensorcontractmatrices!(acquire!(helper, helper.core_dims), core(src), src_factor2s, helper=helper)
+        dest.core .= _spnntucker_project.(prj, src.core .- s .* (core_grad .- tensorXfactors_all),
+                                          s_lambda, bound)
+        (n < N) && release!(helper, tensorXfactors_all) # not acquired if n < N
+        release!(helper, core_grad)
+    else
+        # restore tensor from decomposition replacing the core and n-th factor from src
+	    # FIXME store core*factors(dest, 1:(n-1))
+    	wdecomp_delta = tensorcontractmatrices!(acquire!(helper, size(helper.wtnsr)), core(src),
+        	                                    [factor(i != n ? dest : src, i) for i in 1:N], 1:N, transpose=true, helper=helper)
+        # subtract tnsr and weight
+	    wdecomp_delta .= (wdecomp_delta .- helper.tnsr) .* helper.tnsr_weights
+        # convert back to core dimensions
+        core_grad = tensorcontractmatrices!(acquire!(helper, helper.core_dims), wdecomp_delta,
+                                            [factor(i != n ? dest : src, i) for i in 1:N], 1:N, transpose=false, helper=helper))
+        dest.core .= _spnntucker_project.(prj, src.core .- s .* core_grad, s_lambda, bound)
+        release!(helper, wdecomp_delta)
+        release!(helper, core_grad)
+    end
     return dest
 end
 
@@ -115,32 +128,79 @@ function _spnntucker_update_factor!(
 ) where {T,N}
     src_factor = factor(src, n)
     dest_factor = factor(dest, n)
-    coreXtfactor2, tnsrXcoreXtfactor = _spnntucker_factor_grad_components!(helper, dest, n)
-    factorXcoreXtfactor2 = mul!(acquire!(helper, size(src_factor)), src_factor, coreXtfactor2)
-
-    # update Lipschitz constant
-    helper.L0[n] = helper.L[n]
-    helper.L[n] = max(helper.Lmin, norm(coreXtfactor2))
-    s = (1.0/helper.L[n])
-    # update n-th factor matrix
-
     lambda = helper.lambdas[n]
     bound = helper.bounds[n]
-    @assert size(dest_factor) == size(src_factor) == size(factorXcoreXtfactor2) == size(tnsrXcoreXtfactor)
-    @inbounds if lambda == 0 && isfinite(bound)
-        dest_factor .= min.(src_factor .- s .* (factorXcoreXtfactor2 .- tnsrXcoreXtfactor), bound)
-    else
-        dest_factor .= max.(src_factor .- s .* (factorXcoreXtfactor2 .- tnsrXcoreXtfactor .+ lambda), zero(T))
-    end
-    dest_factor2 = mul!(dest_factor2s[n], dest_factor', dest_factor)
-    factor2XcoreXtfactor2 = dot(dest_factor2, coreXtfactor2)
-    factorXtnsrXcoreXtfactor = dot(dest_factor, tnsrXcoreXtfactor)
-    release!(helper, coreXtfactor2)
-    release!(helper, tnsrXcoreXtfactor)
-    release!(helper, factorXcoreXtfactor2)
+    helper.L0[n] = helper.L[n]
 
-    return 0.5*(factor2XcoreXtfactor2-2*factorXtnsrXcoreXtfactor+helper.tnsr_nrm^2) +
-            _spnntucker_reg_penalty(dest, helper.lambdas)
+    all_but_n = [1:(n-1); (n+1):N]
+    cXtf_size = ntuple(i -> i != n ? size(helper.wtnsr, i) : helper.core_dims[n], N)
+    coreXtfactor = tensorcontractmatrices!(acquire!(helper, cXtf_size),
+                                           core(dest),
+                                           factors(dest, all_but_n), all_but_n, transpose=true, helper=helper)
+    coreXtfactor2 = tensorcontract!(1, coreXtfactor, 1:N, 'N',
+                                    coreXtfactor, [1:(n-1); N+1; (n+1):N], 'N',
+                                     0, acquire!(helper, (helper.core_dims[n], helper.core_dims[n])), [n, N+1], method=:BLAS)
+    helper.L[n] = max(helper.Lmin, norm(coreXtfactor2))
+    s = (1.0/helper.L[n])
+
+    if helper.tnsr_weights === nothing
+        tnsrXcoreXtfactor = tensorcontract!(1, helper.wtnsr, 1:N, 'N',
+                                            coreXtfactor, [1:(n-1); N+1; (n+1):N], 'N',
+                                            0, acquire!(helper, size(factor(dest, n))), [n, N+1], method=:BLAS)::Matrix{T}
+        factorXcoreXtfactor2 = mul!(acquire!(helper, size(src_factor)), src_factor, coreXtfactor2)
+
+        # update Lipschitz constant
+        # update n-th factor matrix
+        @assert size(dest_factor) == size(src_factor) == size(factorXcoreXtfactor2) == size(tnsrXcoreXtfactor)
+        @inbounds if lambda == 0 && isfinite(bound)
+             dest_factor .= min.(src_factor .- s .* (factorXcoreXtfactor2 .- tnsrXcoreXtfactor), bound)
+        else
+             dest_factor .= max.(src_factor .- s .* (factorXcoreXtfactor2 .- tnsrXcoreXtfactor .+ lambda), zero(T))
+        end
+        dest_factor2 = mul!(dest_factor2s[n], dest_factor', dest_factor)
+        factor2XcoreXtfactor2 = dot(dest_factor2, coreXtfactor2)
+        factorXtnsrXcoreXtfactor = dot(dest_factor, tnsrXcoreXtfactor)
+        release!(helper, coreXtfactor)
+        release!(helper, coreXtfactor2)
+        release!(helper, tnsrXcoreXtfactor)
+        release!(helper, factorXcoreXtfactor2)
+
+        return 0.5*(factor2XcoreXtfactor2-2*factorXtnsrXcoreXtfactor+helper.wtnsr_nrm^2) +
+               _spnntucker_reg_penalty(dest, helper.lambdas)
+    else
+        method = contractmethod(nothing, helper)
+        wdecomp_delta = tensorcontractmatrix!(acquire!(helper, size(helper.wtnsr)), coreXtfactor,
+                                              src_factor, n, transpose=true, method=method)
+        @assert size(wdecomp_delta) == size(helper.tnsr) == size(helper.tnsr_weights)
+        @inbounds wdecomp_delta .= (wdecomp_delta .- helper.tnsr) .* helper.tnsr_weights
+        tnsrXfactors = tensorcontractmatrices!(acquire!(helper, ntuple(i -> i != n ? helper.core_dims[i] : size(helper.wtnsr, i), N)),
+                                               wdecomp_delta,
+                                               factors(dest, all_but_n), all_but_n, transpose=false, helper=helper)
+        factor_grad = TensorOperations.contract!(
+                1, tnsrXfactors, Val{:N}, core(dest), Val{:N}, 0,
+                acquire!(helper, size(dest_factor)),
+                (n,), ntuple(i -> i<n ? i : (i+1), N-1),
+                (n,), ntuple(i -> i<n ? i : (i+1), N-1),
+                (1, 2), Val{method})
+
+        @assert size(src_factor) == size(factor_grad)
+        @inbounds if lambda == 0 && isfinite(bound)
+             dest_factor .= min.(src_factor .- s .* factor_grad, bound)
+        else
+             dest_factor .= max.(src_factor .- s .* (factor_grad .+ lambda), zero(T))
+        end
+        release!(helper, coreXtfactor)
+        release!(helper, coreXtfactor2)
+        release!(helper, tnsrXfactors)
+        release!(helper, factor_grad)
+        # recalculate the residue using the updated dest_factor
+        tensorcontractmatrix!(wdecomp_delta, coreXtfactor, dest_factor, n, transpose=true, method=method)
+        @inbounds wdecomp_delta .= (wdecomp_delta .- helper.tnsr) .* helper.tnsr_weights
+        release!(helper, wdecomp_delta)
+        # update dest factor square (used only for L calculation in the weighted case)
+        mul!(dest_factor2s[n], dest_factor', dest_factor)
+        return 0.5*sum(abs2, wdecomp_delta) + _spnntucker_reg_penalty(dest, helper.lambdas)
+    end
 end
 
 function _spnntucker_update_proxy_factor!(
@@ -169,6 +229,7 @@ and sparse nonnegative factor matrices `factors`.
  * `tnsr` nonnegative `N`-mode tensor to decompose
  * `core_dims` size of a core densor
  * `core_nonneg` if true, the output core tensor is nonnegative
+ * `tensor_weights` if not `nothing`, the weights of `tnsr` elements in the residual error
  * `tol` the target error of decomposition relative to the Frobenius norm of `tnsr`
  * `max_iter` maximum number of iterations if error stays above `tol`
  * `max_time` max running time
@@ -202,6 +263,7 @@ See Y. Xu, "Alternating proximal gradient method for sparse nonnegative Tucker d
 See http://www.caam.rice.edu/~optimization/bcu/`
 """
 function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
+                    tensor_weights::Union{StridedArray{T, N}, Nothing} = nothing,
                     core_nonneg::Bool=true, tol::Float64=1e-4, hosvd_init::Bool=false,
                     max_iter::Int=500, max_time::Float64=0.0,
                     lambdas::Vector{Float64} = fill(0.0, N+1),
@@ -249,13 +311,13 @@ function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
     end
 
     #verbose && @info("Initializing helper object...")
-    helper = SPNNTuckerHelper(tnsr, core_dims, lambdas, bounds, Lmin, verbose = verbose)
-    verbose && @info("|tensor|=$(helper.tnsr_nrm)")
+    helper = SPNNTuckerHelper(tnsr, core_dims, lambdas, bounds, Lmin, tensor_weights=tensor_weights, verbose = verbose)
+    verbose && @info("|tensor|=$(helper.wtnsr_nrm)")
 
     verbose && @info("Rescaling initial decomposition...")
     decomp0 = deepcopy(ini_decomp)
     if rescale_ini
-        rescale!(decomp0, helper.tnsr_nrm)
+        rescale!(decomp0, helper.wtnsr_nrm)
     end
     decomp = deepcopy(decomp0)     # current decomposition
     decomp_p = deepcopy(decomp0)   # proxy decomposition
@@ -266,7 +328,10 @@ function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
     factor2_nrms = norm.(factor2s)
 
     #verbose && @info("Calculating initial residue...")
-    resid = resid0 = 0.5*sum(abs2, tnsr .- compose(decomp0)) + _spnntucker_reg_penalty(decomp0, lambdas)
+    resid = resid0 = 0.5*sum(abs2, helper.tnsr_weights === nothing ?
+                                   tnsr .- compose(decomp0) :
+                                   helper.tnsr_weights .* (tnsr .- compose(decomp0))) +
+            _spnntucker_reg_penalty(decomp0, lambdas)
     resid = resid0 # current residual error
     verbose && @info("Initial residue=$resid0")
 
@@ -333,7 +398,7 @@ function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
         resid = residn0
 
         #verbose && @info("Storing statistics...")
-        cur_state = SPNNTuckerState(resid, resid0, helper.tnsr_nrm)
+        cur_state = SPNNTuckerState(resid, resid0, helper.wtnsr_nrm)
         push!(iter_diag, cur_state)
 
         # check stopping criterion
@@ -363,7 +428,7 @@ function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
     res.props[:niter] = niter
     res.props[:nredo] = nredo
     res.props[:converged] = converged
-    res.props[:rel_residue] = 2*sqrt(resid-_spnntucker_reg_penalty(decomp, lambdas))/helper.tnsr_nrm
+    res.props[:rel_residue] = 2*sqrt(resid-_spnntucker_reg_penalty(decomp, lambdas))/helper.wtnsr_nrm
     res.props[:iter_diag] = iter_diag
     return res
 end
