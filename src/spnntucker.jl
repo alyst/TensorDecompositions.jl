@@ -17,7 +17,7 @@ end
 """
 Helper object for spnntucker().
 """
-struct SPNNTuckerHelper{T<:Number, N} <: TensorOpHelper{T}
+mutable struct SPNNTuckerHelper{T<:Number, N} <: TensorOpHelper{T}
     tnsr::Array{T, N}
     tnsr_weights::Union{Array{T, N}, Nothing}   # weights of `tnsr` elements
     wtnsr::Array{T, N}          # weighted `tnsr` (or `tnsr` if no weights)
@@ -28,13 +28,15 @@ struct SPNNTuckerHelper{T<:Number, N} <: TensorOpHelper{T}
     bounds::Vector{T}
     Lmin::Float64
     #tmp_core_unfold::Vector{Matrix{T}}
-    L::Vector{Float64}   # previous Lipschitz constants
+    L::Vector{Float64}          # previous Lipschitz constants
     L0::Vector{Float64}
+    StepMultMin::Float64        # minimal step adjustment multiplier, 1 == no adaptation
+    StepMult::Vector{Float64}   # step adjustment multipliers, != 1
     arr_pool::ArrayPool{T}
 
     function SPNNTuckerHelper(tnsr::Array{T,N}, core_dims::NTuple{N,Int},
                               lambdas::Vector{Float64}, bounds::Vector{T},
-                              Lmin::Float64;
+                              Lmin::Float64, StepMultMin::Float64;
                               tensor_weights::Union{Array{T,N}, Nothing} = nothing,
                               verbose::Bool=false) where {T, N}
         verbose && @info("Precomputing input tensor unfoldings...")
@@ -51,10 +53,14 @@ struct SPNNTuckerHelper{T<:Number, N} <: TensorOpHelper{T}
         new{T,N}(tnsr, tensor_weights, wtnsr, norm(wtnsr), core_dims,
                  [Array{T,N}(undef, ntuple(i -> i <= n ? core_dims[i] : tnsr_dims[i], N)) for n in 1:N],
                  lambdas, bounds,
-                 Lmin, fill(1.0, N+1), fill(1.0, N+1), ArrayPool{T}()
+                 Lmin, fill(1.0, N+1), fill(1.0, N+1),
+                 StepMultMin, fill(1.0, N+1),
+                 ArrayPool{T}()
         )
     end
 end
+
+is_adaptive_steps(helper::SPNNTuckerHelper) = helper.StepMultMin < 1.0
 
 function _spnntucker_update_tensorXfactors_low!(helper::SPNNTuckerHelper{T,N}, decomp::Tucker{T,N}) where {T,N}
     tensorcontractmatrix!(helper.wtnsrXfactors_low[1], helper.wtnsr,
@@ -89,7 +95,7 @@ function _spnntucker_update_core!(prj::Type{Val{PRJ}},
     helper::SPNNTuckerHelper{T,N}, dest::Tucker{T,N}, src::Tucker{T,N},
     src_factor2s::Vector{Matrix{T}}, n::Integer
 ) where {T,N,PRJ}
-    s = (one(T)/helper.L[N+1])
+    s = (helper.StepMult[N+1]/helper.L[N+1])
     s_lambda = (helper.lambdas[N+1]/helper.L[N+1])
     bound = helper.bounds[N+1]
 
@@ -141,7 +147,7 @@ function _spnntucker_update_factor!(
                                     coreXtfactor, [1:(n-1); N+1; (n+1):N], 'N',
                                      0, acquire!(helper, (helper.core_dims[n], helper.core_dims[n])), [n, N+1], method=:BLAS)
     helper.L[n] = max(helper.Lmin, norm(coreXtfactor2))
-    s = (1.0/helper.L[n])
+    s = (helper.StepMult[n]/helper.L[n])
 
     if helper.tnsr_weights === nothing
         tnsrXcoreXtfactor = tensorcontract!(1, helper.wtnsr, 1:N, 'N',
@@ -267,7 +273,8 @@ function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
                     core_nonneg::Bool=true, tol::Float64=1e-4, hosvd_init::Bool=false,
                     max_iter::Int=500, max_time::Float64=0.0,
                     lambdas::Vector{Float64} = fill(0.0, N+1),
-                    Lmin::Float64 = 1.0, rw::Float64=0.9999,
+                    Lmin::Float64 = 1.0, adaptive_steps::Bool=false, step_mult_min::Float64=1E-3,
+                    rw::Float64=0.9999,
                     bounds::Vector{Float64} = fill(Inf, N+1), ini_decomp = nothing,
                     verbose::Bool=false) where {T,N}
     start_time = time()
@@ -311,7 +318,9 @@ function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
     end
 
     #verbose && @info("Initializing helper object...")
-    helper = SPNNTuckerHelper(tnsr, core_dims, lambdas, bounds, Lmin, tensor_weights=tensor_weights, verbose = verbose)
+    helper = SPNNTuckerHelper(tnsr, core_dims, lambdas, bounds,
+                              Lmin, adaptive_steps ? step_mult_min : 1.0,
+                              tensor_weights=tensor_weights, verbose = verbose)
     verbose && @info("|tensor|=$(helper.wtnsr_nrm)")
 
     verbose && @info("Rescaling initial decomposition...")
@@ -345,6 +354,7 @@ function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
     iter_diag = Vector{SPNNTuckerState}()
     nstall = 0
     nredo = 0
+    nnoredo = zeros(Int, N+1)
     converged = false
 
     #verbose && @info("Starting iterations...")
@@ -356,25 +366,50 @@ function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
         residn0 = resid
         _spnntucker_update_tensorXfactors_low!(helper, decomp0)
 
+        any_redone = false
         for n in N:-1:1
             # -- update the core tensor Z --
             helper.L0[N+1] = helper.L[N+1]
-            helper.L[N+1] = max(helper.Lmin, prod(factor2_nrms))
+            helper.L[N+1] = max(prod(factor2_nrms), helper.Lmin)
 
             # try to make a step using extrapolated decompositon (Zm,Um)
             _spnntucker_update_core!(projection_type, helper, decomp, decomp_p, factor2s, n)
             residn = _spnntucker_update_factor!(helper, decomp, decomp_p, factor2s, n)
-            if residn > residn0
+            redone = residn > residn0
+            while residn > residn0
                 # extrapolated Zm,Um decomposition lead to residual norm increase,
                 # revert extrapolation and make a step using Z0,U0 to ensure
                 # objective function is decreased
-                nredo += 1
                 # re-update to make objective nonincreasing
                 copyto!(factor2s[n], factor2s0[n]) # restore factor square, core update needs it
                 _spnntucker_update_core!(projection_type, helper, decomp, decomp0, factor2s, n)
                 residn = _spnntucker_update_factor!(helper, decomp, decomp0, factor2s, n)
-                verbose && residn > residn0 && @warn("$niter: residue increase at redo step")
+                if residn > residn0
+                    verbose && @warn("$niter: residue increase at redo step")
+                    if is_adaptive_steps(helper)
+                        # reduce core and n-th factor steps by 0.9 and 0.8, resp.
+                        StepMultCore = max(0.9 * helper.StepMult[N+1], helper.StepMultMin)
+                        StepMultFactor = max(0.8 * helper.StepMult[n], helper.StepMultMin)
+                        if (StepMultCore == helper.StepMultMin) && (StepMultFactor == helper.StepMultMin)
+                            verbose && @warn("$niter: adaptive step multipliers reached their minimum")
+                            break
+                        end
+                        helper.StepMult[N+1] = StepMultCore
+                        helper.StepMult[n] = StepMultFactor
+                    else
+                        break
+                    end
+                end
             end
+            if redone
+                nnoredo[n] = 0
+                nnoredo[N+1] = 0
+                any_redone = true
+                nredo += 1
+            else
+                nnoredo[n] += 1
+            end
+
             # --- correction and extrapolation ---
             t[n] = (1.0+sqrt(1.0+4.0*t0[n]^2))/2.0
             #verbose && @info("Updating proxy factors $n...")
@@ -391,7 +426,14 @@ function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
             t0[n] = t[n]
             t0[N+1] = t[N+1]
             residn0 = residn
+            # update StepMult[n]
+            if is_adaptive_steps(helper) && helper.StepMult[n] < 1.0 && (nnoredo[n] >= 3) && mod(nnoredo[n], 3) == 0
+                # increase StepMult for the n-th factor after 3 successful iterations
+                helper.StepMult[n] = min(helper.StepMult[n] * 1.1, 1.0)
+                verbose && @info("Increasing $(n)-th factor step multiplier: $(helper.StepMult[n])")
+            end
         end
+        any_redone || (nnoredo[N+1] += 1)
 
         # --- diagnostics, reporting, stopping checks ---
         resid0 = resid
@@ -401,13 +443,20 @@ function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
         cur_state = SPNNTuckerState(resid, resid0, helper.wtnsr_nrm)
         push!(iter_diag, cur_state)
 
+        if is_adaptive_steps(helper) && helper.StepMult[N+1] < 1.0 && (nnoredo[N+1] >= 3) && mod(nnoredo[N+1], 3) == 0
+            # increase StepMult for the core tensor after 3 successful iterations
+            helper.StepMult[N+1] = min(helper.StepMult[N+1] * 1.05, 1.0)
+            verbose && @info("Increasing core tensor step multiplier: $(helper.StepMult[N+1])")
+        end
+
         # check stopping criterion
+        adj_tol = tol * prod(helper.StepMult)^(1/length(helper.StepMult))
         niter += 1
-        nstall = cur_state.rel_residue_delta < tol ? nstall + 1 : 0
-        if nstall >= 3 || cur_state.rel_residue < tol
+        nstall = cur_state.rel_residue_delta < adj_tol ? nstall + 1 : 0
+        if nstall >= 3 || cur_state.rel_residue < adj_tol
             verbose && (cur_state.rel_residue == 0.0) && @info("Residue is zero. Exact decomposition was found")
-            verbose && (nstall >= 3) && @info("Decrease of the relative error is below $tol $nstall times in a row")
-            verbose && (cur_state.rel_residue < tol) && @info("Relative error is $(cur_state.rel_residue) times below input tensor norm")
+            verbose && (nstall >= 3) && @info("Decrease of the relative error is below $adj_tol $nstall times in a row")
+            verbose && (cur_state.rel_residue < adj_tol) && @info("Relative error is $(cur_state.rel_residue) times below input tensor norm")
             verbose && @info("spnntucker() converged in $niter iteration(s), $nredo redo steps")
             converged = true
             finish!(pb)

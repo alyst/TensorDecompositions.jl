@@ -33,9 +33,10 @@ end
     tnsr = add_noise(tnsr_orig, 0.6, false)
 
     # Solve the problem
-    @time tucker_spnn = spnntucker(tnsr, size(tucker_orig.core), tol=1E-5, ini_decomp=:hosvd,
+    @time tucker_spnn = spnntucker(tnsr, size(tucker_orig.core), tol=1E-5,
+                             ini_decomp=:hosvd, adaptive_steps=true,
                              core_nonneg=false,
-                             max_iter=1000, verbose=true, lambdas=fill(0.1, 4))
+                             max_iter=1000, verbose=true, lambdas=fill(0.01, 4))
 
     # Reporting
     @test rel_residue(tucker_spnn) < 0.05
