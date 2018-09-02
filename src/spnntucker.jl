@@ -57,6 +57,7 @@ mutable struct SPNNTuckerHelper{T<:Number, N} <: TensorOpHelper{T}
     wtnsr_nrm::Float64          # norm of the weighted tnsr
     proj_types::Vector{Type}
     lambdas::Vector{T}
+    mus::Vector{T}
     bounds::Vector{T}
     Lmin::Float64
     #tmp_core_unfold::Vector{Matrix{T}}
@@ -65,7 +66,7 @@ mutable struct SPNNTuckerHelper{T<:Number, N} <: TensorOpHelper{T}
     arr_pool::ArrayPool{T}
 
     function SPNNTuckerHelper(tnsr::Array{T,N}, is_nonneg::Vector{Bool},
-                              lambdas::Vector{Float64}, bounds::Vector{T},
+                              lambdas::Vector{Float64}, mus::Vector{Float64}, bounds::Vector{T},
                               Lmin::Float64, StepMultMin::Float64;
                               tensor_weights::Union{Array{T,N}, Nothing} = nothing,
                               verbose::Bool=false) where {T, N}
@@ -81,9 +82,9 @@ mutable struct SPNNTuckerHelper{T<:Number, N} <: TensorOpHelper{T}
             wtnsr = tnsr .* (tensor_weights ./ w_max)
         end
         # determine projection types
-        proj_types = Type[Val{_spnntucker_projection_type(is_nonneg[i], lambdas[i], bounds[i])} for i in 1:(N+1)]
+        proj_types = Type[Val{_spnntucker_projection_type(is_nonneg[i], lambdas[i] + (i <= N ? mus[i] : 0.0), bounds[i])} for i in 1:(N+1)]
         new{T,N}(tnsr, tensor_weights, wtnsr, norm(wtnsr),
-                 proj_types, lambdas, bounds,
+                 proj_types, lambdas, mus, bounds,
                  Lmin, StepMultMin, fill(1.0, N+1),
                  ArrayPool{T}()
         )
@@ -100,13 +101,14 @@ mutable struct SPNNTuckerState{T,N} <: TensorDecomposition{T, N}
     factor2s::Vector{Matrix{T}}     # factor squares
     wtnsrXfactors_low::Vector{Array{T, N}}
     factor2_nrms::Vector{Float64}   # Frobenius norms of factor squares
+    ortho_penalty::Vector{Float64}
     resid::Float64
     L::Vector{Float64}              # Lipschitz constants
 
     function SPNNTuckerState(tucker::Tucker{T,N}, helper::SPNNTuckerHelper{T,N}, init::Bool=false) where {T,N}
         decomp = new{T,N}(tucker,
                  [Matrix{T}(undef, size(f, 2), size(f, 2)) for f in factors(tucker)],
-                 Vector{Array{T,N}}(), zeros(Float64, N), NaN,
+                 Vector{Array{T,N}}(), zeros(Float64, N), zeros(Float64, N), NaN,
                  fill(NaN, N+1))
         if init
             #verbose && @info("Calculating factors squares...")
@@ -139,6 +141,7 @@ function copy_core_and_factor!(dest::SPNNTuckerState{T,N}, src::SPNNTuckerState{
     copyto!(dest.tucker.factors[n], src.tucker.factors[n])
     copyto!(dest.factor2s[n], src.factor2s[n]) # restore factor square, core update needs it
     dest.factor2_nrms[n] = src.factor2_nrms[n]
+    dest.ortho_penalty[n] = src.ortho_penalty[n]
     dest.resid = src.resid
     dest.L[N+1] = src.L[N+1]
     dest.L[n] = src.L[n]
@@ -163,6 +166,7 @@ function _spnntucker_reg_penalty(decomp::SPNNTuckerState{T,N}, helper::SPNNTucke
     res = 0.0
     for i in 1:N
         helper.lambdas[i] > 0.0 && (res += helper.lambdas[i] * sum(abs, factor(decomp, i)))
+        helper.mus[i] > 0.0 && (res += 0.5 * helper.mus[i] * decomp.ortho_penalty[i])
     end
     helper.lambdas[N+1] > 0.0 && (res += helper.lambdas[N+1] * sum(abs, core(decomp)))
     return res
@@ -233,12 +237,81 @@ function _spnntucker_update_factor!(prj::Type{Val{PRJ}},
 
     if helper.tnsr_weights === nothing
         # update n-th factor matrix
-        factorXcoreXtfactor2 = mul!(acquire!(helper, size(src_factor)), src_factor, coreXtfactor2)
-        @assert size(dest_factor) == size(src_factor) == size(factorXcoreXtfactor2) == size(tnsrXcoreXtfactor)
-        lambda = s*helper.lambdas[n]
-        @inbounds dest_factor .= _spnntucker_project.(prj, src_factor .- s .* (factorXcoreXtfactor2 .- tnsrXcoreXtfactor),
-                                                      lambda, bound)
-        release!(helper, factorXcoreXtfactor2)
+        if helper.mus[n] == 0.0
+            factorXcoreXtfactor2 = mul!(acquire!(helper, size(src_factor)), src_factor, coreXtfactor2)
+            @assert size(dest_factor) == size(src_factor) == size(factorXcoreXtfactor2) == size(tnsrXcoreXtfactor)
+            lambda = s*helper.lambdas[n]
+            @inbounds dest_factor .= _spnntucker_project.(prj, src_factor .- s .* (factorXcoreXtfactor2 .- tnsrXcoreXtfactor),
+                                                          lambda, bound)
+            release!(helper, factorXcoreXtfactor2)
+        else
+            # SVD-like case, enforce "orthogonality" of dest_factor columns
+            coreXtfactor_mtx = _col_unfold(copyto!(acquire!(helper, size(coreXtfactor)), coreXtfactor), n)
+            wtnsr_delta_mtx = _col_unfold(copyto!(acquire!(helper, size(helper.wtnsr)), helper.wtnsr), n)
+            # multiply wtnsr_delta_mtx = wtnsr_delta_mtx - coreXfactor*dest_factor
+            # FIXME use proper character (instead of 'N') when T is complex
+            BLAS.gemm!('N', 'T', one(T), coreXtfactor_mtx, dest_factor, -one(T), wtnsr_delta_mtx)
+            tmp_col = acquire!(helper, size(src_factor, 1))
+            dest_factor_cols_sum = acquire!(helper, (size(dest_factor, 1), 1))
+            sum!(dest_factor_cols_sum, dest_factor)
+            fXf_mtx = mul!(acquire!(helper, (size(dest_factor, 1), size(dest_factor, 1))), dest_factor, dest_factor')
+            total_L2 = 0.0
+            for j in 1:size(src_factor, 2)
+                # column-wise update of dest factor
+                # subtract j-th dest_factor column × j-th row from coreXtfactor2 from factorXcoreXtfactor2
+                src_col = view(src_factor, :, j)
+                dest_col = view(dest_factor, :, j)
+                cXtf_row = view(coreXtfactor_mtx, :, j)
+                @inbounds for i1 in eachindex(dest_col), i2 in eachindex(cXtf_row)
+                    wtnsr_delta_mtx[i2, i1] -= dest_col[i1]*cXtf_row[i2]
+                end
+                # subtract j-th dest_factor column × itself from fXf
+                @inbounds dest_factor_cols_sum .-= dest_col # exclude dest_col from L
+                @inbounds for i1 in eachindex(dest_col), i2 in eachindex(dest_col)
+                    fXf_mtx[i2, i1] -= dest_col[i1]*dest_col[i2]
+                end
+
+                # update Lipschitz constant for orthogonalization term
+                L2 = sum(abs2, dest_factor_cols_sum) *
+                     abs2(dot(src_col, view(dest_factor_cols_sum, :, 1)))
+                total_L2 += L2
+                L = max(helper.Lmin, sqrt(L2))
+
+                # update dest_col
+                mul!(tmp_col, wtnsr_delta_mtx', cXtf_row)
+                mul!(dest_col, fXf_mtx, src_col)
+                b = max(helper.Lmin, sum(abs2, cXtf_row))
+                k1 = 1.0/(b+helper.mus[n]*L)
+                k2 = k1*helper.mus[n]
+                lambda = k1*helper.lambdas[n]
+                bound = helper.bounds[n]
+                dest_col .= _spnntucker_project.(prj, k2.*(src_col.*L .- dest_col) .- k1.*tmp_col, lambda, bound)
+                # add updated j-th dest_factor column × j-th row from coreXtfactor2 from factorXcoreXtfactor2
+                @inbounds for i1 in eachindex(dest_col), i2 in eachindex(cXtf_row)
+                    wtnsr_delta_mtx[i2, i1] += dest_col[i1]*cXtf_row[i2]
+                end
+                # add updated j-th dest_factor column × itself from fXf
+                @inbounds dest_factor_cols_sum .+= dest_col # add updated dest_col to the L
+                @inbounds for i1 in eachindex(dest_col), i2 in eachindex(dest_col)
+                    fXf_mtx[i2, i1] += dest_col[i1]*dest_col[i2]
+                end
+            end
+            # update dest_factor-dependent fields of decomp
+            decomp.L[n] += helper.mus[n]*sqrt(total_L2)
+            ortho_penalty = 0.0
+            @inbounds for j1 in 1:size(dest_factor, 2)
+                dest_col1 = view(dest_factor, :, j1)
+                @inbounds for j2 in (j1+1):size(dest_factor, 2)
+                    ortho_penalty += dot(dest_col1, view(dest_factor, :, j2))^2
+                end
+            end
+            decomp.ortho_penalty[n] = 2*ortho_penalty
+            release!(helper, wtnsr_delta_mtx)
+            release!(helper, coreXtfactor_mtx)
+            release!(helper, fXf_mtx)
+            release!(helper, tmp_col)
+            release!(helper, dest_factor_cols_sum)
+        end
         dest_factor2 = mul!(decomp.factor2s[n], dest_factor', dest_factor)
         decomp.factor2_nrms[n] = norm(dest_factor2)
         factor2XcoreXtfactor2 = dot(dest_factor2, coreXtfactor2)
@@ -351,6 +424,7 @@ function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
                     tol::Float64=1e-4, hosvd_init::Bool=false,
                     max_iter::Int=500, max_time::Float64=0.0,
                     lambdas::Vector{Float64} = fill(0.0, N+1),
+                    mus::Vector{Float64} = fill(0.0, N),
                     Lmin::Float64 = 1.0, adaptive_steps::Bool=false, step_mult_min::Float64=1E-3,
                     rw::Float64=0.9999,
                     bounds::Vector{Float64} = fill(Inf, N+1), ini_decomp = nothing,
@@ -378,7 +452,7 @@ function spnntucker(tnsr::StridedArray{T, N}, core_dims::NTuple{N, Int};
     #verbose && @info("Initializing helper object...")
     helper = SPNNTuckerHelper(tnsr,
                               Bool[factor_nonneg !== nothing ? factor_nonneg : fill(true, N); core_nonneg],
-                              lambdas, bounds,
+                              lambdas, mus, bounds,
                               Lmin, adaptive_steps ? step_mult_min : 1.0,
                               tensor_weights=tensor_weights, verbose = verbose)
     verbose && @info("|tensor|=$(helper.wtnsr_nrm)")
