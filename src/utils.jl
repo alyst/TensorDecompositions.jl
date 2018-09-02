@@ -215,17 +215,26 @@ function _unfold(tnsr::StridedArray, row_modes::Vector{Int}, col_modes::Vector{I
                    prod(dims[row_modes]), prod(dims[col_modes]))
 end
 
+function _unfold(tnsr::StridedArray, row_modes::NTuple{NR, Int}, col_modes::NTuple{NC, Int}) where {NR, NC}
+    length(row_modes) + length(col_modes) == ndims(tnsr) ||
+        throw(ArgumentError("column and row modes should be disjoint subsets of 1:$(ndims(tnsr))"))
+
+    return reshape(permutedims(tnsr, ntuple(i -> i <= NR ? row_modes[i] : col_modes[i - NR], ndims(tnsr))),
+                   prod(ntuple(i -> size(tnsr, row_modes[i]), NR)),
+                   prod(ntuple(i -> size(tnsr, col_modes[i]), NC)))
+end
+
 """
 Unfolds the tensor into matrix such that the specified mode becomes matrix row.
 """
 _row_unfold(tnsr::StridedArray, mode::Integer) =
-    _unfold(tnsr, [mode], [1:mode-1; mode+1:ndims(tnsr)])
+    _unfold(tnsr, (mode,), ntuple(i -> i < mode ? i : i+1, ndims(tnsr)-1))
 
 """
 Unfolds the tensor into matrix such that the specified mode becomes matrix column.
 """
 _col_unfold(tnsr::StridedArray, mode::Integer) =
-    _unfold(tnsr, [1:mode-1; mode+1:ndims(tnsr)], [mode])
+    _unfold(tnsr, ntuple(i -> i < mode ? i : i+1, ndims(tnsr)-1), (mode,))
 
 function _iter_status(converged::Bool, niters::Integer, maxiter::Integer)
     converged ? @info("Algorithm converged after $(niters) iterations.") :
