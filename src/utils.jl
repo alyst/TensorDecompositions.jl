@@ -24,19 +24,40 @@ Contract N-mode tensor and M matrices.
   * `src`  source tensor to contract
   * `matrices` matrices to contract
   * `modes` corresponding modes of matrices to contract
+  * `pool` `ArrayPool` to use for getting intermediate tensors
   * `transpose` if true, matrices are contracted along their columns
 """
-function tensorcontractmatrices!(dest::Array{T,N}, src::Array{T,N}, matrices::Any,
-                                 modes::Any = 1:length(matrices);
-                                 transpose::Bool=false, method::Symbol=:BLAS) where {T,N}
+function tensorcontractmatrices!(dest::StridedArray{T,N}, src::StridedArray{T,N},
+                                 matrices::Any, modes::Any = 1:length(matrices);
+                                 pool::Union{ArrayPool{T}, Nothing} = nothing,
+                                 transpose::Bool=false, method::Symbol=:BLAS) where {T, N}
     length(matrices) == length(modes) ||
         throw(ArgumentError("The number of matrices doesn't match the length of mode sequence"))
-    for i in 1:length(matrices)-1
-        src = tensorcontractmatrix(src, matrices[i], modes[i],
-                                   transpose=transpose, method=method)
+    if length(matrices) == 1 || pool === nothing
+        for i in 1:length(matrices)-1
+            src = tensorcontractmatrix(src, matrices[i], modes[i],
+                                       transpose=transpose, method=method)
+        end
+        tensorcontractmatrix!(dest, src, matrices[end], modes[end],
+                              transpose=transpose, method=method)
+    else
+        local tmp::Array{T,N}
+        tmp_size = collect(size(src))::Vector{Int}
+        for i in 1:length(matrices)-1
+            mode = modes[i]
+            mtx = matrices[i]
+            tmp_size[mode] = size(mtx, transpose ? 1 : 2)
+            new_tmp = acquire!(pool, ntuple(k -> tmp_size[k], N))::Array{T,N}
+            tensorcontractmatrix!(new_tmp, i > 1 ? tmp : src, mtx, mode,
+                                  transpose=transpose, method=method)
+            (i > 1) && release!(pool, tmp)
+            tmp = new_tmp
+        end
+        tensorcontractmatrix!(dest, tmp, matrices[end], modes[end],
+                              transpose=transpose, method=method)
+        release!(pool, tmp)
     end
-    tensorcontractmatrix!(dest, src, matrices[end], modes[end],
-                          transpose=transpose, method=method)
+    return dest
 end
 
 """

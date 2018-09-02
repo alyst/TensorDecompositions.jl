@@ -97,10 +97,10 @@ function _spnntucker_update_core!(prj::Type{Val{PRJ}},
 
     tensorXfactors_all = n < N ?
         tensorcontractmatrices!(acquire!(helper, helper.core_dims),
-                                helper.tnsrXfactors_low[n], dest.factors[(n+1):N], (n+1):N) :
+                                helper.tnsrXfactors_low[n], dest.factors[(n+1):N], (n+1):N, pool=helper.arr_pool) :
         helper.tnsrXfactors_low[N]
     s = (1.0/helper.L[N+1])
-    core_grad = tensorcontractmatrices!(acquire!(helper, helper.core_dims), core(src), src_factor2s)
+    core_grad = tensorcontractmatrices!(acquire!(helper, helper.core_dims), core(src), src_factor2s, pool=helper.arr_pool)
     s_lambda = (helper.lambdas[N+1]/helper.L[N+1])::Float64
     bound = helper.bounds[N+1]
     dest.core .= _spnntucker_project.(prj, src.core .- s .* (core_grad .- tensorXfactors_all),

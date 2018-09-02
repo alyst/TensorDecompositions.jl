@@ -50,4 +50,13 @@
         @test size(res) == (5, 2, 6)
     end
 
+    @testset "tensorcontractmatrices!() with pool" do
+        pool = TensorDecompositions.ArrayPool{Float64}()
+        factors = TensorDecompositions._random_factors(size(T), (5, 2, 6))
+        dest = TensorDecompositions.acquire!(pool, (5, 2, 6))
+        res = tensorcontractmatrices!(dest, T, factors, 1:3, pool=pool)
+        @test res == dest
+        TensorDecompositions.release!(pool, dest)
+    end
+
 end
