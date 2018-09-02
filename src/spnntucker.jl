@@ -55,7 +55,7 @@ end
 
 function _spnntucker_factor_grad_components!(helper::SPNNTuckerHelper{T,N}, decomp::Tucker{T,N}, n::Int) where {T,N}
     all_but_n = [1:(n-1); (n+1):N]
-    cXtf_size = (size(helper.tnsr)[1:n-1]..., helper.core_dims[n], size(helper.tnsr)[(n+1):N]...)
+    cXtf_size = ntuple(i -> i != n ? size(helper.tnsr, i) : helper.core_dims[n], N)
     coreXtfactor = tensorcontractmatrices!(acquire!(helper, cXtf_size),
                                            core(decomp),
                                            factors(decomp, all_but_n), all_but_n, transpose=true, helper=helper)
