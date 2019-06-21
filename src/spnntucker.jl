@@ -227,10 +227,10 @@ function _spnntucker_update_factor!(prj::Type{Val{PRJ}},
                                            factors(decomp, all_but_n), all_but_n, transpose=true, helper=helper)
     coreXtfactor2 = tensorcontract!(1, coreXtfactor, 1:N, 'N',
                                     coreXtfactor, [1:(n-1); N+1; (n+1):N], 'N',
-                                    0, acquire!(helper, (core_ndim, core_ndim)), [n, N+1], method=:BLAS)::Matrix{T}
+                                    0, acquire!(helper, (core_ndim, core_ndim)), [n, N+1])::Matrix{T}
     tnsrXcoreXtfactor = tensorcontract!(1, helper.wtnsr, 1:N, 'N',
                                         coreXtfactor, [1:(n-1); N+1; (n+1):N], 'N',
-                                        0, acquire!(helper, size(dest_factor)), [n, N+1], method=:BLAS)::Matrix{T}
+                                        0, acquire!(helper, size(dest_factor)), [n, N+1])::Matrix{T}
     # update Lipschitz constant
     decomp.L[n] = max(helper.Lmin, norm(coreXtfactor2))
     s = (helper.StepMult[n]/decomp.L[n])
@@ -314,20 +314,19 @@ function _spnntucker_update_factor!(prj::Type{Val{PRJ}},
         decomp.resid = 0.5*(factor2XcoreXtfactor2-2*factorXtnsrXcoreXtfactor+abs2(helper.wtnsr_nrm)) +
                _spnntucker_reg_penalty(decomp, helper)
     else
-        method = contractmethod(nothing, helper)
         wdecomp_delta = tensorcontractmatrix!(acquire!(helper, size(helper.wtnsr)), coreXtfactor,
-                                              src_factor, n, transpose=true, method=method)
+                                              src_factor, n, transpose=true)
         @assert size(wdecomp_delta) == size(helper.tnsr) == size(helper.tnsr_weights)
         @inbounds wdecomp_delta .= (wdecomp_delta .- helper.tnsr) .* helper.tnsr_weights
         tnsrXfactors = tensorcontractmatrices!(acquire!(helper, ntuple(i -> i != n ? size(core(decomp), i) : size(helper.wtnsr, i), N)),
                                                wdecomp_delta,
                                                factors(decomp, all_but_n), all_but_n, transpose=false, helper=helper)
         factor_grad = TensorOperations.contract!(
-                1, tnsrXfactors, Val{:N}, core(decomp), Val{:N}, 0,
+                1, tnsrXfactors, :N, core(decomp), :N, 0,
                 acquire!(helper, size(dest_factor)),
                 (n,), ntuple(i -> i<n ? i : (i+1), N-1),
                 (n,), ntuple(i -> i<n ? i : (i+1), N-1),
-                (1, 2), Val{method})
+                (1, 2))
 
         lambda = s*helper.lambdas[n]
         @assert size(src_factor) == size(factor_grad)
@@ -338,7 +337,7 @@ function _spnntucker_update_factor!(prj::Type{Val{PRJ}},
         release!(helper, tnsrXfactors)
         release!(helper, factor_grad)
         # recalculate the residue using the updated dest_factor
-        tensorcontractmatrix!(wdecomp_delta, coreXtfactor, dest_factor, n, transpose=true, method=method)
+        tensorcontractmatrix!(wdecomp_delta, coreXtfactor, dest_factor, n, transpose=true)
         @inbounds wdecomp_delta .= (wdecomp_delta .- helper.tnsr) .* helper.tnsr_weights
         release!(helper, wdecomp_delta)
         # update dest factor square (used only for L calculation in the weighted case)

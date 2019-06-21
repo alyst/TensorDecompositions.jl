@@ -10,43 +10,37 @@ release!(helper::TensorOpHelper{T}, arr::Array{T}) where T =
     (arraypool(helper) !== nothing) && release!(arraypool(helper), arr)
 
 arraypool(helper::Nothing) = nothing
-contractmethod(method, helper::Union{TensorOpHelper, Nothing}) = something(method, :BLAS) # default contract method
 
-struct SimpleTensorOpHelper{T,M,P} <: TensorOpHelper{T}
+struct SimpleTensorOpHelper{T,P} <: TensorOpHelper{T}
     arr_pool::P
 
     # default constructor to resolve type instability
-    SimpleTensorOpHelper{T}(contract_method::Symbol,
-                            pool::Union{Nothing, ArrayPool{T}}) where T =
-        new{T,contract_method,typeof(pool)}(pool)
+    SimpleTensorOpHelper{T}(pool::Union{Nothing, ArrayPool{T}}) where T =
+        new{T,typeof(pool)}(pool)
 end
 
-TensorOpHelper{T}(contract_method::Symbol,
-                  pool::Union{ArrayPool{T}, Nothing}) where T =
-    SimpleTensorOpHelper{T}(contract_method, pool)
+TensorOpHelper{T}(pool::Union{ArrayPool{T}, Nothing}) where T =
+    SimpleTensorOpHelper{T}(pool)
 
-TensorOpHelper{T}(;contract_method::Symbol = :BLAS, use_pool::Bool = true) where T =
-    TensorOpHelper{T}(contract_method, use_pool ? ArrayPool{T}() : nothing)
-
-contractmethod(method, helper::SimpleTensorOpHelper{<:Any,CM}) where CM = something(method, CM)
+TensorOpHelper{T}(; use_pool::Bool = true) where T =
+    TensorOpHelper{T}(use_pool ? ArrayPool{T}() : nothing)
 
 function tensorcontractmatrix!(dest::StridedArray{T,N}, src::StridedArray{T,N},
                                mtx::StridedMatrix{T}, n::Int;
-                               transpose::Bool=false, method::Symbol=:BLAS) where {T,N}
-    #@info "TTM: dest=$(size(dest)) src=$(size(src)) mtx=$(size(mtx)) n=$n transpose=$transpose method=$method"
-    TensorOperations.contract!(1, src, Val{:N}, mtx, Val{:N}, 0, dest,
+                               transpose::Bool=false) where {T,N}
+    #@info "TTM: dest=$(size(dest)) src=$(size(src)) mtx=$(size(mtx)) n=$n transpose=$transpose"
+    TensorOperations.contract!(1, src, :N, mtx, :N, 0, dest,
                                ntuple(i -> i<n ? i : (i+1), N-1), (n,),
                                transpose ? (1,) : (2,), transpose ? (2,) : (1,),
-                               ntuple(i -> i<n ? i : (i==n ? N : i-1), N),
-                               Val{method})
+                               ntuple(i -> i<n ? i : (i==n ? N : i-1), N))
 end
 
 function tensorcontractmatrix(tnsr::StridedArray{T,N}, mtx::StridedMatrix{T}, n::Int;
-                              transpose::Bool=false, method=nothing,
+                              transpose::Bool=false,
                               helper::Union{TensorOpHelper{T}, Nothing} = nothing) where {T, N}
     dest_size = ntuple(i -> i != n ? size(tnsr, i) : size(mtx, transpose ? 1 : 2), N)
     tensorcontractmatrix!(helper !== nothing ? acquire!(helper, dest_size) : Array{T, N}(undef, dest_size),
-                          tnsr, mtx, n, transpose=transpose, method=contractmethod(method, helper))
+                          tnsr, mtx, n, transpose=transpose)
 end
 
 """
@@ -61,7 +55,7 @@ Contract N-mode tensor and M matrices.
 """
 function tensorcontractmatrices!(dest::StridedArray{T,N}, src::StridedArray{T,N},
                                  matrices::Any, modes::Any = ntuple(i -> i, N);
-                                 transpose::Bool=false, method=nothing,
+                                 transpose::Bool=false,
                                  helper::Union{TensorOpHelper{T}, Nothing} = nothing) where {T, N}
     length(matrices) == length(modes) ||
         throw(ArgumentError("The number of matrices doesn't match the length of mode sequence"))
@@ -74,7 +68,7 @@ function tensorcontractmatrices!(dest::StridedArray{T,N}, src::StridedArray{T,N}
         res_dims = ntuple(k -> res_size[k], N)
         dest_i = i < length(matrices) ? (helper !== nothing ? acquire!(helper, res_dims) : Array{T, N}(undef, res_dims)) : dest
         tensorcontractmatrix!(dest_i, i > 1 ? tmp : src, mtx, mode,
-                              transpose=transpose, method=contractmethod(method, helper))
+                              transpose=transpose)
         (i > 1) && (helper !== nothing) && release!(helper, tmp)
         tmp = dest_i
     end
@@ -94,7 +88,7 @@ If `pool` is provided, the resulting tensor is acquired from the pool.
 """
 function tensorcontractmatrices(tensor::StridedArray{T,N}, matrices::Any,
                                 modes::Any = 1:length(matrices);
-                                transpose::Bool=false, method=nothing,
+                                transpose::Bool=false,
                                 helper::Union{TensorOpHelper{T}, Nothing} = nothing) where {T, N}
     length(matrices) == length(modes) ||
         throw(ArgumentError("The number of matrices doesn't match the length of mode sequence"))
@@ -105,7 +99,7 @@ function tensorcontractmatrices(tensor::StridedArray{T,N}, matrices::Any,
     dest_dims = ntuple(i -> new_size[i], N)
     return tensorcontractmatrices!(helper !== nothing ? acquire!(helper, dest_dims) : Array{T,N}(undef, dest_dims),
                                    tensor, matrices, modes,
-                                   transpose=transpose, method=method, helper=helper)
+                                   transpose=transpose, helper=helper)
 end
 
 """

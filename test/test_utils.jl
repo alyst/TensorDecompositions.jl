@@ -61,8 +61,6 @@
         @test helper isa TensorDecompositions.SimpleTensorOpHelper
         @test eltype(helper) == Float64
         @test TensorDecompositions.arraypool(helper) isa TensorDecompositions.ArrayPool
-        @test TensorDecompositions.contractmethod(nothing, helper) == :BLAS
-        @test TensorDecompositions.contractmethod(:native, helper) == :native
         factors = TensorDecompositions._random_factors(size(T), (5, 2, 6))
         dest = @inferred TensorDecompositions.acquire!(helper, (5, 2, 6))
         res = @inferred tensorcontractmatrices!(dest, T, factors, 1:3, transpose=false, helper=helper)
